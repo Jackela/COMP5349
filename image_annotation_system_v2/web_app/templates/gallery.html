@@ -1,0 +1,73 @@
+{% extends "layout.html" %}
+
+{% block title %}Image Gallery - Image Annotation System{% endblock %}
+
+{% block content %}
+<div class="gallery-container">
+    <h1>Image Gallery</h1>
+
+    {% if error_message %}
+        <div class="error-message">
+            {{ error_message }}
+        </div>
+    {% elif not images %}
+        <div class="no-images-message">
+            <p>No images uploaded yet. Go to the Upload page to add some!</p>
+            <a href="{{ url_for('index_get') }}" class="button">Upload Images</a>
+        </div>
+    {% else %}
+        <div class="gallery-grid">
+            {% for image in images %}
+                <div class="gallery-item">
+                    <div class="image-container">
+                        {% if image.thumbnail_image_url and image.thumbnail_status == 'completed' %}
+                            <img src="{{ image.thumbnail_image_url }}" 
+                                 alt="Thumbnail for {{ image.original_s3_key }}" 
+                                 class="thumbnail">
+                        {% elif image.thumbnail_status == 'pending' %}
+                            <div class="processing-placeholder">
+                                <div class="spinner"></div>
+                                <p>Thumbnail processing...</p>
+                            </div>
+                        {% elif image.thumbnail_status == 'failed' %}
+                            <div class="error-placeholder">
+                                <p>Thumbnail generation failed</p>
+                            </div>
+                        {% else %}
+                            <div class="placeholder">
+                                <p>No thumbnail available</p>
+                            </div>
+                        {% endif %}
+                    </div>
+
+                    <div class="image-info">
+                        <div class="caption-section">
+                            {% if image.caption and image.caption_status == 'completed' %}
+                                <p class="caption">{{ image.caption }}</p>
+                            {% elif image.caption_status == 'pending' %}
+                                <p class="caption-status pending">Caption processing...</p>
+                            {% elif image.caption_status == 'failed' %}
+                                <p class="caption-status failed">
+                                    Caption generation failed
+                                    {% if image.caption %}
+                                        <br><span class="error-detail">{{ image.caption }}</span>
+                                    {% endif %}
+                                </p>
+                            {% else %}
+                                <p class="caption-status">No caption available</p>
+                            {% endif %}
+                        </div>
+
+                        <div class="image-meta">
+                            <p class="upload-time">Uploaded: {{ image.uploaded_at.strftime('%Y-%m-%d %H:%M:%S') }}</p>
+                            {% if image.original_image_url %}
+                                <a href="{{ image.original_image_url }}" target="_blank" class="view-original">View Original</a>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+            {% endfor %}
+        </div>
+    {% endif %}
+</div>
+{% endblock %} 

@@ -1,0 +1,25 @@
+{% extends "layout.html" %}
+
+{% block title %}Error {{ error_code }} - Image Annotation System{% endblock %}
+
+{% block content %}
+<div class="error-container">
+    <div class="error-content">
+        <h1 class="error-title">Error {{ error_code }}</h1>
+        
+        <div class="error-message">
+            {{ error_message }}
+        </div>
+
+        {% if request_id %}
+            <div class="request-id">
+                Request ID: {{ request_id }}
+            </div>
+        {% endif %}
+
+        <div class="error-actions">
+            <a href="{{ url_for('index_get') }}" class="button">Go to Homepage</a>
+        </div>
+    </div>
+</div>
+{% endblock %} 

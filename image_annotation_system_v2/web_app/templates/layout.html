@@ -1,0 +1,44 @@
+<!-- Base HTML layout template -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Image Annotation System{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <header>
+        <nav class="main-nav">
+            <div class="nav-container">
+                <a href="{{ url_for('index_get') }}" class="nav-link">Home (Upload)</a>
+                <a href="{{ url_for('gallery_get') }}" class="nav-link">Gallery</a>
+            </div>
+        </nav>
+    </header>
+
+    <main class="container">
+        {# Flash Messages Section #}
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                <div class="flash-messages">
+                    {% for category, message in messages %}
+                        <div class="flash-message {{ category }}">
+                            {{ message }}
+                        </div>
+                    {% endfor %}
+                </div>
+            {% endif %}
+        {% endwith %}
+
+        {# Main Content Block #}
+        {% block content %}{% endblock %}
+    </main>
+
+    <footer class="main-footer">
+        <div class="footer-container">
+            <p>&copy; 2024 COMP5349 Assignment 2 - Image Annotation System</p>
+        </div>
+    </footer>
+</body>
+</html> 

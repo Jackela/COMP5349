@@ -125,22 +125,22 @@ class TestLambdaHandler:
         
         # Mock thumbnail generation
         mock_thumbnail_io = io.BytesIO(b"mock thumbnail content")
-        mocker.patch(
+        mock_generate_thumbnail_func = mocker.patch(
             'lambda_functions.thumbnail_lambda.lambda_function._generate_thumbnail',
             return_value=mock_thumbnail_io
         )
         
         # Mock S3 upload
-        mocker.patch(
+        mock_upload_thumbnail_func = mocker.patch(
             'lambda_functions.thumbnail_lambda.lambda_function._upload_thumbnail_to_s3'
         )
         
         # Mock DB connection and update
-        mocker.patch(
+        mock_get_db_connection_func = mocker.patch(
             'lambda_functions.thumbnail_lambda.lambda_function._get_db_connection_lambda',
             return_value=mock_db_connection
         )
-        mocker.patch(
+        mock_update_thumbnail_info_func = mocker.patch(
             'lambda_functions.thumbnail_lambda.lambda_function._update_thumbnail_info_in_db',
             return_value=True
         )
@@ -160,14 +160,14 @@ class TestLambdaHandler:
         )
         
         # Verify thumbnail generation was called with correct dimensions
-        _generate_thumbnail.assert_called_once_with(
+        mock_generate_thumbnail_func.assert_called_once_with(
             mock_image_bytes,
             (128, 128),
             mock_lambda_context.aws_request_id
         )
         
         # Verify thumbnail upload was called
-        _upload_thumbnail_to_s3.assert_called_once_with(
+        mock_upload_thumbnail_func.assert_called_once_with(
             'test-bucket',
             'thumbnails/test-image.jpg',
             mock_thumbnail_io,
@@ -175,13 +175,14 @@ class TestLambdaHandler:
         )
         
         # Verify DB update was called
-        _update_thumbnail_info_in_db.assert_called_once_with(
+        mock_update_thumbnail_info_func.assert_called_once_with(
             mock_db_connection,
             'test-image.jpg',
             'thumbnails/test-image.jpg',
             'completed',
             mock_lambda_context.aws_request_id
         )
+        mock_get_db_connection_func.assert_called_once_with(mock_lambda_context.aws_request_id)
 
     def test_handler_skips_thumbnail_path_object(
         self, mocker, mock_s3_event_for_thumbnail, mock_lambda_context
@@ -224,11 +225,11 @@ class TestLambdaHandler:
         mocker.patch('boto3.client', return_value=mock_s3_client)
         
         # Mock DB connection and update
-        mocker.patch(
+        mock_get_db_connection_func = mocker.patch(
             'lambda_functions.thumbnail_lambda.lambda_function._get_db_connection_lambda',
             return_value=mock_db_connection
         )
-        mocker.patch(
+        mock_update_thumbnail_info_func = mocker.patch(
             'lambda_functions.thumbnail_lambda.lambda_function._update_thumbnail_info_in_db',
             return_value=True
         )
@@ -241,13 +242,14 @@ class TestLambdaHandler:
         assert exc_info.value.error_code == "S3_DOWNLOAD_FAILED"
         
         # Verify DB was updated with failure status
-        _update_thumbnail_info_in_db.assert_called_once_with(
+        mock_update_thumbnail_info_func.assert_called_once_with(
             mock_db_connection,
             'test-image.jpg',
             None,
             'failed',
             mock_lambda_context.aws_request_id
         )
+        mock_get_db_connection_func.assert_called_once_with(mock_lambda_context.aws_request_id)
 
     def test_handler_image_processing_failure_updates_db_and_raises(
         self, mocker, mock_s3_event, mock_lambda_context, mock_image_bytes, mock_db_connection
@@ -274,7 +276,7 @@ class TestLambdaHandler:
         mocker.patch('boto3.client', return_value=mock_s3_client)
         
         # Mock thumbnail generation to raise error
-        mocker.patch(
+        mock_generate_thumbnail_func = mocker.patch(
             'lambda_functions.thumbnail_lambda.lambda_function._generate_thumbnail',
             side_effect=ImageProcessingError(
                 "Failed to process image",
@@ -283,11 +285,11 @@ class TestLambdaHandler:
         )
         
         # Mock DB connection and update
-        mocker.patch(
+        mock_get_db_connection_func = mocker.patch(
             'lambda_functions.thumbnail_lambda.lambda_function._get_db_connection_lambda',
             return_value=mock_db_connection
         )
-        mocker.patch(
+        mock_update_thumbnail_info_func = mocker.patch(
             'lambda_functions.thumbnail_lambda.lambda_function._update_thumbnail_info_in_db',
             return_value=True
         )
@@ -300,13 +302,15 @@ class TestLambdaHandler:
         assert exc_info.value.error_code == "PILLOW_PROCESSING_ERROR"
         
         # Verify DB was updated with failure status
-        _update_thumbnail_info_in_db.assert_called_once_with(
+        mock_update_thumbnail_info_func.assert_called_once_with(
             mock_db_connection,
             'test-image.jpg',
             None,
             'failed',
             mock_lambda_context.aws_request_id
         )
+        mock_get_db_connection_func.assert_called_once_with(mock_lambda_context.aws_request_id)
+        mock_generate_thumbnail_func.assert_called_once()
 
     def test_handler_s3_thumbnail_upload_failure_updates_db_and_raises(
         self, mocker, mock_s3_event, mock_lambda_context, mock_image_bytes, mock_db_connection
@@ -334,13 +338,13 @@ class TestLambdaHandler:
         
         # Mock thumbnail generation
         mock_thumbnail_io = io.BytesIO(b"mock thumbnail content")
-        mocker.patch(
+        mock_generate_thumbnail_func = mocker.patch(
             'lambda_functions.thumbnail_lambda.lambda_function._generate_thumbnail',
             return_value=mock_thumbnail_io
         )
         
         # Mock thumbnail upload to raise error
-        mocker.patch(
+        mock_upload_thumbnail_func = mocker.patch(
             'lambda_functions.thumbnail_lambda.lambda_function._upload_thumbnail_to_s3',
             side_effect=S3InteractionError(
                 "Failed to upload thumbnail",
@@ -349,11 +353,11 @@ class TestLambdaHandler:
         )
         
         # Mock DB connection and update
-        mocker.patch(
+        mock_get_db_connection_func = mocker.patch(
             'lambda_functions.thumbnail_lambda.lambda_function._get_db_connection_lambda',
             return_value=mock_db_connection
         )
-        mocker.patch(
+        mock_update_thumbnail_info_func = mocker.patch(
             'lambda_functions.thumbnail_lambda.lambda_function._update_thumbnail_info_in_db',
             return_value=True
         )
@@ -366,13 +370,16 @@ class TestLambdaHandler:
         assert exc_info.value.error_code == "S3_UPLOAD_FAILED"
         
         # Verify DB was updated with failure status
-        _update_thumbnail_info_in_db.assert_called_once_with(
+        mock_update_thumbnail_info_func.assert_called_once_with(
             mock_db_connection,
             'test-image.jpg',
-            None,
+            'thumbnails/test-image.jpg',
             'failed',
             mock_lambda_context.aws_request_id
         )
+        mock_get_db_connection_func.assert_called_once_with(mock_lambda_context.aws_request_id)
+        mock_generate_thumbnail_func.assert_called_once()
+        mock_upload_thumbnail_func.assert_called_once()
 
     def test_handler_db_update_failure_raises_db_error_after_processing(
         self, mocker, mock_s3_event, mock_lambda_context, mock_image_bytes, mock_db_connection
@@ -400,22 +407,22 @@ class TestLambdaHandler:
         
         # Mock thumbnail generation
         mock_thumbnail_io = io.BytesIO(b"mock thumbnail content")
-        mocker.patch(
+        mock_generate_thumbnail_func = mocker.patch(
             'lambda_functions.thumbnail_lambda.lambda_function._generate_thumbnail',
             return_value=mock_thumbnail_io
         )
         
         # Mock thumbnail upload
-        mocker.patch(
+        mock_upload_thumbnail_func = mocker.patch(
             'lambda_functions.thumbnail_lambda.lambda_function._upload_thumbnail_to_s3'
         )
         
         # Mock DB connection and update to raise error
-        mocker.patch(
+        mock_get_db_connection_func = mocker.patch(
             'lambda_functions.thumbnail_lambda.lambda_function._get_db_connection_lambda',
             return_value=mock_db_connection
         )
-        mocker.patch(
+        mock_update_thumbnail_info_func = mocker.patch(
             'lambda_functions.thumbnail_lambda.lambda_function._update_thumbnail_info_in_db',
             side_effect=DatabaseError(
                 "Failed to update database",
@@ -429,6 +436,12 @@ class TestLambdaHandler:
         
         assert "Failed to update database" in str(exc_info.value)
         assert exc_info.value.error_code == "DB_UPDATE_FAILED"
+        # Verify that the processing functions were called
+        mock_s3_client.get_object.assert_called_once()
+        mock_generate_thumbnail_func.assert_called_once()
+        mock_upload_thumbnail_func.assert_called_once()
+        mock_get_db_connection_func.assert_called_once()
+        mock_update_thumbnail_info_func.assert_called_once()
 
     def test_handler_invalid_thumbnail_size_env_uses_default_and_logs_warning(
         self, mocker, mock_s3_event, mock_lambda_context, mock_image_bytes, mock_db_connection
@@ -456,22 +469,22 @@ class TestLambdaHandler:
         
         # Mock thumbnail generation
         mock_thumbnail_io = io.BytesIO(b"mock thumbnail content")
-        mocker.patch(
+        mock_generate_thumbnail_func = mocker.patch(
             'lambda_functions.thumbnail_lambda.lambda_function._generate_thumbnail',
             return_value=mock_thumbnail_io
         )
         
         # Mock thumbnail upload
-        mocker.patch(
+        mock_upload_thumbnail_func = mocker.patch(
             'lambda_functions.thumbnail_lambda.lambda_function._upload_thumbnail_to_s3'
         )
         
         # Mock DB connection and update
-        mocker.patch(
+        mock_get_db_connection_func = mocker.patch(
             'lambda_functions.thumbnail_lambda.lambda_function._get_db_connection_lambda',
             return_value=mock_db_connection
         )
-        mocker.patch(
+        mock_update_thumbnail_info_func = mocker.patch(
             'lambda_functions.thumbnail_lambda.lambda_function._update_thumbnail_info_in_db',
             return_value=True
         )
@@ -483,11 +496,15 @@ class TestLambdaHandler:
         assert result['status'] == 'success'
         
         # Verify thumbnail generation was called with default dimensions (128,128)
-        _generate_thumbnail.assert_called_once_with(
+        mock_generate_thumbnail_func.assert_called_once_with(
             mock_image_bytes,
             (128, 128),
             mock_lambda_context.aws_request_id
         )
+        # Verify other calls
+        mock_upload_thumbnail_func.assert_called_once()
+        mock_get_db_connection_func.assert_called_once()
+        mock_update_thumbnail_info_func.assert_called_once()
 
 # --- Test Helper Functions ---
 class TestGenerateThumbnail:
@@ -497,8 +514,9 @@ class TestGenerateThumbnail:
         """Test successful thumbnail generation from PNG with alpha channel."""
         # Arrange
         mock_img = MagicMock()
-        mock_img.mode = 'RGBA'
+        mock_img.mode = 'P'
         mock_img.size = (200, 200)
+        mock_img.info = {}
         
         # Mock Image.open to return our mock image
         mocker.patch('PIL.Image.open', return_value=mock_img)
@@ -513,10 +531,15 @@ class TestGenerateThumbnail:
         # Assert
         assert isinstance(result, io.BytesIO)
         mock_img.convert.assert_called_once_with('RGB')
-        mock_img.thumbnail.assert_called_once_with((128, 128), Image.Resampling.LANCZOS)
-        mock_img.save.assert_called_once()
-        # Verify save was called with JPEG format
-        save_args = mock_img.save.call_args[1]
+        
+        # Get the mock object returned by mock_img.convert('RGB')
+        converted_mock_img = mock_img.convert.return_value
+        
+        converted_mock_img.thumbnail.assert_called_once_with((128, 128), Image.Resampling.LANCZOS)
+        
+        # Verify save was called on the converted image, with JPEG format
+        converted_mock_img.save.assert_called_once()
+        save_args = converted_mock_img.save.call_args[1]
         assert save_args.get('format') == 'JPEG'
 
     def test_generate_thumbnail_success_no_alpha_conversion(
@@ -562,8 +585,8 @@ class TestGenerateThumbnail:
                 'test-request-id'
             )
         
-        assert "Failed to process image" in str(exc_info.value)
-        assert exc_info.value.error_code == "PILLOW_PROCESSING_ERROR"
+        assert "Cannot identify image file" in str(exc_info.value)
+        assert exc_info.value.error_code == "INVALID_IMAGE_FORMAT"
 
     def test_generate_thumbnail_other_pillow_error_raises_image_processing_error(
         self, mocker
@@ -571,7 +594,13 @@ class TestGenerateThumbnail:
         """Test other Pillow errors are properly wrapped in ImageProcessingError."""
         # Arrange
         mock_img = MagicMock()
-        mock_img.thumbnail.side_effect = Exception("Pillow error")
+        mock_img.mode = 'P'
+        mock_img.info = {}
+
+        mock_converted_img = MagicMock()
+        mock_converted_img.thumbnail.side_effect = Exception("Pillow error")
+        mock_img.convert.return_value = mock_converted_img
+
         mocker.patch('PIL.Image.open', return_value=mock_img)
         
         # Act & Assert
@@ -582,7 +611,7 @@ class TestGenerateThumbnail:
                 'test-request-id'
             )
         
-        assert "Failed to process image" in str(exc_info.value)
+        assert "Pillow processing error: Pillow error" in str(exc_info.value)
         assert exc_info.value.error_code == "PILLOW_PROCESSING_ERROR"
 
 class TestUploadThumbnailToS3:
@@ -604,10 +633,16 @@ class TestUploadThumbnailToS3:
         
         # Assert
         mock_s3_client.upload_fileobj.assert_called_once()
-        upload_args = mock_s3_client.upload_fileobj.call_args[1]
-        assert upload_args['Bucket'] == 'test-bucket'
-        assert upload_args['Key'] == 'thumbnails/test-image.jpg'
-        assert upload_args['ExtraArgs']['ContentType'] == 'image/jpeg'
+        
+        args, kwargs = mock_s3_client.upload_fileobj.call_args
+        
+        # Assert positional arguments: Bucket (args[1]), Key (args[2])
+        # Fileobj (args[0]) is thumbnail_io, which we can also assert if needed.
+        assert args[1] == 'test-bucket'  # Bucket
+        assert args[2] == 'thumbnails/test-image.jpg' # Key
+        
+        # Assert ExtraArgs from keyword arguments
+        assert kwargs['ExtraArgs']['ContentType'] == 'image/jpeg'
 
     def test_upload_s3_clienterror_raises_s3_interaction_error(self, mocker):
         """Test S3 ClientError is properly wrapped in S3InteractionError."""
@@ -716,7 +751,7 @@ class TestGetDBConnectionLambda:
         with pytest.raises(ConfigurationError) as exc_info:
             _get_db_connection_lambda('test-request-id')
         
-        assert "Missing required environment variables" in str(exc_info.value)
+        assert "Missing required database configuration" in str(exc_info.value)
 
     def test_get_db_connection_failure_raises_db_error(self, mocker):
         """Test connection failure raises DatabaseError."""
@@ -781,5 +816,5 @@ class TestUpdateThumbnailInfoInDB:
                 'test-request-id'
             )
         
-        assert "Failed to update database" in str(exc_info.value)
+        assert "Database error while updating thumbnail info" in str(exc_info.value)
         assert exc_info.value.error_code == "DB_UPDATE_FAILED"

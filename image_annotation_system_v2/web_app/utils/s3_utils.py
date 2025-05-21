@@ -48,13 +48,13 @@ def upload_file_to_s3(
         error_code_from_s3 = e.response.get('Error', {}).get('Code')
         raise S3InteractionError(
             message=f"S3 upload failed: {e.response.get('Error', {}).get('Message', str(e))}",
-            error_code="S3_UPLOAD_FAILED",
+            error_code=error_code_from_s3 if error_code_from_s3 else "S3_UPLOAD_FAILED",
             original_exception=e
         )
     except Exception as e:
         raise S3InteractionError(
             message=f"An unexpected error occurred during S3 upload: {str(e)}",
-            error_code="S3_UPLOAD_FAILED",
+            error_code="S3_UNEXPECTED_UPLOAD_ERROR",
             original_exception=e
         )
 
@@ -102,12 +102,12 @@ def generate_presigned_url(
         error_code_from_s3 = e.response.get('Error', {}).get('Code')
         raise S3InteractionError(
             message=f"Failed to generate presigned URL for s3://{bucket_name}/{s3_key}: {e.response.get('Error', {}).get('Message', str(e))}",
-            error_code="S3_PRESIGN_FAILED",
+            error_code=error_code_from_s3 if error_code_from_s3 else "S3_PRESIGN_FAILED",
             original_exception=e
         )
     except Exception as e:
         raise S3InteractionError(
             message=f"An unexpected error occurred during presigned URL generation for s3://{bucket_name}/{s3_key}: {str(e)}",
-            error_code="S3_PRESIGN_FAILED",
+            error_code="S3_UNEXPECTED_PRESIGNED_URL_ERROR",
             original_exception=e
         ) 

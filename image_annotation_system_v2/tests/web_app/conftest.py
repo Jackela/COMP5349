@@ -110,7 +110,14 @@ def app():
         "TESTING": True,
         "WTF_CSRF_ENABLED": False,  # Disable CSRF protection for testing
         "MAX_CONTENT_LENGTH": 16 * 1024 * 1024,  # 16MB
-        "ALLOWED_EXTENSIONS": {'png', 'jpg', 'jpeg', 'gif'}
+        "ALLOWED_EXTENSIONS": {'png', 'jpg', 'jpeg', 'gif'},
+        # Explicitly set S3_IMAGE_BUCKET here to ensure it's not None
+        "S3_IMAGE_BUCKET": os.environ.get('S3_IMAGE_BUCKET', 'test-image-bucket-fallback'),
+        "DB_HOST": os.environ.get('DB_HOST'), # Ensure these are also picked up if mock_env_vars is used
+        "DB_USER": os.environ.get('DB_USER'),
+        "DB_PASSWORD": os.environ.get('DB_PASSWORD'),
+        "DB_NAME": os.environ.get('DB_NAME'),
+        "DB_PORT": int(os.environ.get('DB_PORT', 3306))
     })
     
     with flask_app.test_request_context():
@@ -119,7 +126,17 @@ def app():
 @pytest.fixture
 def client(app): # 依赖上面定义的 app fixture
     """A test client for the app."""
-    return app.test_client()
+    # Patch get_db_connection here to ensure it's active for test client requests
+    with patch('web_app.utils.db_utils.get_db_connection') as mock_get_db_conn:
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+        # Configure common mock behaviors for the DB connection if needed
+        # For example, mock_cursor.fetchone.return_value = None
+        # mock_cursor.fetchall.return_value = []
+        # mock_cursor.lastrowid = 1 # if your tests expect a lastrowid
+        mock_get_db_conn.return_value = mock_conn
+        yield app.test_client()
 
 @pytest.fixture
 def runner(app): # 依赖上面定义的 app fixture

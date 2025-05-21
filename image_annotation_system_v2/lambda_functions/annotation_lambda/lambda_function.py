@@ -371,13 +371,24 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     except DatabaseError as db_e:
         logger.error(f"Database error during status update: {db_e.message}",
                     extra={'request_id': aws_request_id})
-        if exception_caught_during_processing:
-            logger.error("Original processing error was not updated in database",
-                        extra={'request_id': aws_request_id})
+        # If a processing error already occurred, log that we couldn't update its status.
+        # Otherwise, this db_e is the primary error to be raised.
+        if not exception_caught_during_processing:
+            exception_caught_during_processing = db_e
+        else:
+            logger.error("Original processing error's status could not be updated in the database due to a subsequent DatabaseError.", extra={'request_id': aws_request_id})
             
-    except Exception as db_unhandled_e:
+    except Exception as db_unhandled_e: # Catch any other unhandled DB-related exceptions
         logger.critical(f"Unhandled error during database operations: {str(db_unhandled_e)}",
                        exc_info=True, extra={'request_id': aws_request_id})
+        if not exception_caught_during_processing:
+            exception_caught_during_processing = COMP5349A2Error(
+                f"Unhandled error during database operations: {str(db_unhandled_e)}",
+                error_code='DB_UNHANDLED_ERROR',
+                original_exception=db_unhandled_e
+            )
+        else:
+            logger.error("Original processing error's status could not be updated in the database due to an unhandled exception during DB ops.", extra={'request_id': aws_request_id})
         
     finally:
         if db_conn:

@@ -173,7 +173,7 @@ def upload_post():
         flash("File too large. Maximum size is 16MB.", 'danger')
         return render_template('index.html'), 400
     filename = secure_filename(file.filename)
-    s3_key = f"{uuid.uuid4().hex}.{filename.rsplit('.', 1)[1].lower()}"
+    s3_key = f"uploads/{uuid.uuid4().hex}.{filename.rsplit('.', 1)[1].lower()}"
     app.logger.info(f"Generated s3_key: {s3_key} for file: {filename}", extra={'request_id': request_id})
     content_type = get_mime_type(filename)
     try:

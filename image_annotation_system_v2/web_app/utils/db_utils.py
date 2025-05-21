@@ -156,7 +156,7 @@ def save_initial_image_meta(
             # Specific error for unique constraint violation
             raise DatabaseError(
                 message=f"Duplicate entry for original_s3_key: {original_s3_key}. This image key already exists in the database.",
-                error_code="DB_UPDATE_FAILED",
+                error_code="DB_UNIQUE_VIOLATION",
                 original_exception=e
             )
         else:

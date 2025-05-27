@@ -4,6 +4,7 @@ import uuid
 import logging
 from flask import Flask, request, redirect, url_for, render_template, flash, g, jsonify
 from werkzeug.utils import secure_filename
+from cachetools import TTLCache
 # Smart import handling - works in both development and production
 try:
     # Try relative imports first (for proper package structure)
@@ -48,6 +49,9 @@ if not app.logger.handlers:
     handler.setFormatter(formatter)
     app.logger.addHandler(handler)
 app.logger.setLevel(log_level)
+
+# Global cache for S3 presigned URLs with a 5-minute TTL
+url_cache = TTLCache(maxsize=1000, ttl=300)
 
 # Database connection management
 @app.before_request
@@ -218,27 +222,45 @@ def gallery_get():
             img_data = dict(record)
             if isinstance(img_data['uploaded_at'], str):
                 img_data['uploaded_at'] = datetime.datetime.fromisoformat(img_data['uploaded_at'].replace('Z', '+00:00'))
+            
+            original_s3_key = record.get('s3_key_original')
+            thumbnail_s3_key = record.get('s3_key_thumbnail')
+
             img_data['original_image_url'] = None
             img_data['thumbnail_image_url'] = None
-            # Generate presigned URLs, handle failures gracefully
-            try:
-                if record.get('s3_key_original'):
-                    img_data['original_image_url'] = s3_utils.generate_presigned_url(
-                        app.config['S3_IMAGE_BUCKET'],
-                        record['s3_key_original'],
-                        request_id=request_id
-                    )
-            except S3InteractionError as s3_e_presign:
-                app.logger.error(f"Failed to generate presigned URL for S3 key {record.get('s3_key_original')}: {s3_e_presign.message}", extra={'request_id': request_id})
-            try:
-                if record.get('s3_key_thumbnail') and record.get('thumbnail_status') == 'completed':
-                    img_data['thumbnail_image_url'] = s3_utils.generate_presigned_url(
-                        app.config['S3_THUMBNAIL_BUCKET'],
-                        record['s3_key_thumbnail'],
-                        request_id=request_id
-                    )
-            except S3InteractionError as s3_e_presign:
-                app.logger.error(f"Failed to generate presigned URL for S3 key {record.get('s3_key_thumbnail')}: {s3_e_presign.message}", extra={'request_id': request_id})
+
+            # --- Handle original image URL ---
+            if original_s3_key:
+                if original_s3_key in url_cache:
+                    img_data['original_image_url'] = url_cache[original_s3_key]
+                else:
+                    try:
+                        url = s3_utils.generate_presigned_url(
+                            app.config['S3_IMAGE_BUCKET'],
+                            original_s3_key,
+                            request_id=request_id
+                        )
+                        url_cache[original_s3_key] = url
+                        img_data['original_image_url'] = url
+                    except S3InteractionError as s3_e_presign:
+                        app.logger.error(f"Failed to generate presigned URL for S3 key {original_s3_key}: {s3_e_presign.message}", extra={'request_id': request_id})
+            
+            # --- Handle thumbnail URL similarly ---
+            if thumbnail_s3_key and record.get('thumbnail_status') == 'completed':
+                if thumbnail_s3_key in url_cache:
+                    img_data['thumbnail_image_url'] = url_cache[thumbnail_s3_key]
+                else:
+                    try:
+                        url = s3_utils.generate_presigned_url(
+                            app.config['S3_THUMBNAIL_BUCKET'],
+                            thumbnail_s3_key,
+                            request_id=request_id
+                        )
+                        url_cache[thumbnail_s3_key] = url
+                        img_data['thumbnail_image_url'] = url
+                    except S3InteractionError as s3_e_presign:
+                        app.logger.error(f"Failed to generate presigned URL for S3 key {thumbnail_s3_key}: {s3_e_presign.message}", extra={'request_id': request_id})
+            
             processed_images.append(img_data)
         app.logger.info(f"Successfully prepared {len(processed_images)} images for gallery display.", extra={'request_id': request_id})
         return render_template('gallery.html', images=processed_images)

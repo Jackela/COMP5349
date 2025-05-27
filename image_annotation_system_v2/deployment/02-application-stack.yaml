@@ -105,22 +105,6 @@ Resources:
         - Key: Name
           Value: !Sub "${EnvironmentName} Thumbnails Bucket"
 
-  LambdaCodeBucket:
-    Type: AWS::S3::Bucket
-    Properties:
-      BucketName: !Sub "${EnvironmentName}-lambda-code-artifacts-${AWS::AccountId}-${AWS::Region}" # Ensure global uniqueness and lowercase
-      AccessControl: Private
-      PublicAccessBlockConfiguration:
-        BlockPublicAcls: true
-        IgnorePublicAcls: true
-        BlockPublicPolicy: true
-        RestrictPublicBuckets: true
-      VersioningConfiguration:
-        Status: Enabled # Versioning is good for code packages
-      Tags:
-        - Key: Name
-          Value: !Sub "${EnvironmentName} Lambda Code Artifacts Bucket"
-
   # RDS Database Subnet Group
   DBSubnetGroup:
     Type: AWS::RDS::DBSubnetGroup
@@ -179,12 +163,6 @@ Outputs:
     Value: !Ref ThumbnailsBucket
     Export:
       Name: !Sub "${AWS::StackName}-ThumbnailsBucketName"
-
-  LambdaCodeBucketName:
-    Description: Name of the S3 bucket for Lambda deployment packages
-    Value: !Ref LambdaCodeBucket
-    Export:
-      Name: !Sub "${AWS::StackName}-LambdaCodeBucketName"
 
   RDSEndpointAddress:
     Description: Endpoint address of the RDS database instance

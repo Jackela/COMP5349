@@ -36,8 +36,7 @@ Parameters:
       Full ECR Image URI (including tag or SHA256 digest) for the Web Application Docker image.
       The ECR repository itself (e.g., comp5349a2-web-app) is created by the ECR Stack.
       Example: 032664865485.dkr.ecr.us-east-1.amazonaws.com/comp5349a2-web-app:latest
-    # Add a sensible default or leave it blank to force user input
-    # Default: "032664865485.dkr.ecr.us-east-1.amazonaws.com/comp5349a2-web-app:latest" # Replace with your actual ECR image URI
+    Default: "032664865485.dkr.ecr.us-east-1.amazonaws.com/comp5349a2-web-app@sha256:bbcf60e2c9837d743fd1fbb423bba0201a3a0c5e0117dd24d5de0e98bc1fdf94"
 
   InstanceType:
     Type: String

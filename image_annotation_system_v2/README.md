@@ -280,7 +280,8 @@ The system is deployed on AWS using a set of AWS CloudFormation templates locate
         *   **Must be deployed first.**
     *   **`01-vpc-network.yaml`**: Sets up the foundational networking infrastructure (VPC, subnets, etc.).
     *   **`02-application-stack.yaml`**: Provisions core application-level resources (S3, RDS). 
-        *   *Note: This stack does not create the primary IAM execution roles for Lambda/EC2; these are assumed to be prerequisites and passed as `LabRoleArn`.*
+        *   **Key Resources**: S3 buckets for original images (`S3_IMAGE_BUCKET`) and thumbnails (`S3_THUMBNAIL_BUCKET`), RDS MySQL database instance.
+        *   *Note: This stack does not create ECR repositories (done by `00-ecr-repositories.yaml`) or the primary IAM execution roles for Lambda/EC2 (these are assumed to be prerequisites and passed as `LabRoleArn`).*
     *   **`03-lambda-stack.yaml`**: Deploys the Lambda functions and their triggers. 
         *   Relies on ECR repositories created by `00-ecr-repositories.yaml`.
         *   Requires the full ECR image URIs (including tag/digest) as parameters.

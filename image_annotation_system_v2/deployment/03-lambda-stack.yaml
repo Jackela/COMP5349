@@ -40,7 +40,7 @@ Parameters:
     Description: >
       Full ECR Image URI (including tag or SHA256 digest) for the Annotation Lambda function. 
       The ECR repository itself (e.g., comp5349a2-annotation-lambda) is created by the ECR Stack.
-    Default: "032664865485.dkr.ecr.us-east-1.amazonaws.com/comp5349a2-annotation-lambda@sha256:30c89ee6303d67ee7497ab7c0c239d0853d3e1deddcb6de568105e875d337994"
+    Default: "032664865485.dkr.ecr.us-east-1.amazonaws.com/comp5349a2-annotation-lambda@sha256:d4970b35508ccaab28bb2ec18252692d85b60bac1c6245890c5f9b9c77a5668d"
 
   ThumbnailLambdaImageUri:
     Type: String

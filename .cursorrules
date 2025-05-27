@@ -1,0 +1,43 @@
+# Cursor Project Rules for COMP5349 (Image Annotation System v2)
+
+## 1. Primary Guidance Documents (CRITICAL - Read These First!)
+
+*   **AI Operational Guide:** For detailed, step-by-step operational procedures, specific file interaction workflows, and AI decision-making aids, ALWAYS refer to: `COMP5349/shrimp-rules.md`.
+*   **Core Project Design & Specs:** For overall project architecture, Python coding standards (PEP 8), AWS resource design, Lambda business logic, error handling strategy, database schema, and naming conventions, ALWAYS refer to: `COMP5349/COMP5349 Assignment 2 - 项目设计文档.md`.
+
+## 2. Project Overview & Key Technologies
+
+*   **Project:** Image Annotation System (`image_annotation_system_v2`).
+*   **Goal:** Upload images to S3, trigger Lambda functions via EventBridge for thumbnail generation and AI-powered (Gemini) annotation, storing results in RDS.
+*   **Tech Stack:** Python 3.9, AWS (Lambda, S3, ECR, EventBridge, CloudFormation, RDS MySQL), Flask, Docker, Pytest.
+*   **Deployment:** CloudFormation for infrastructure, Lambda functions deployed as Docker container images from ECR.
+
+## 3. Core AI Collaboration Mode & Responsibilities
+
+*   **Your Role (AI):** Primarily assist in code generation/modification (Python, YAML), problem analysis, and *guiding the user* through local operations.
+*   **User's Role:** Execute commands requiring local environment/credentials (e.g., `docker build`, `docker push`, `aws ecr batch-get-image`, CloudFormation deployment via AWS console/CLI).
+*   **CRITICAL for Lambda Updates:**
+    1.  AI modifies code/Dockerfile.
+    2.  AI guides user to build/push image and get **platform-specific digest** for `linux/amd64`.
+    3.  AI updates `03-lambda-stack.yaml` with the new digest.
+    4.  User deploys the stack.
+*   **DO NOT** attempt to directly execute `docker push`, `aws ecr get-login-password`, etc., using terminal tools. You lack the necessary local context/credentials.
+
+## 4. Key Files & Directories (Frequent Reference)
+
+*   Lambdas: `image_annotation_system_v2/lambda_functions/{annotation_lambda | thumbnail_lambda}/{lambda_function.py, Dockerfile, requirements.txt, custom_exceptions.py}`
+*   CloudFormation: `deployment/{02-application-stack.yaml, 03-lambda-stack.yaml}`
+*   Tests: `pytest.ini`, `image_annotation_system_v2/tests/lambda_functions/`
+
+## 5. Quick Reminders & Common Pitfalls to Avoid
+
+*   **Lambda Event Source:** Lambdas are triggered by EventBridge. Original S3 event is in `event['detail']`. Code must handle this and fallback to `event['Records']` for direct S3 events (mainly for tests).
+*   **ECR Digest:** ALWAYS use the **platform-specific digest** (`linux/amd64`) for Lambda `ImageUri` in CloudFormation, not the index digest from `docker push` output. The user provides this after `aws ecr batch-get-image`.
+*   **Local Python Modules:** If adding/modifying `.py` files in Lambda directories (e.g., `custom_exceptions.py`), ensure `Dockerfile` copies them to `${LAMBDA_TASK_ROOT}/`.
+*   **Dependencies:** Pin exact versions in `requirements.txt`.
+*   **Idempotency & Error Handling:** Critical for Lambda functions. Refer to `COMP5349/COMP5349 Assignment 2 - 项目设计文档.md` (primary) and `COMP5349/shrimp-rules.md` (operational aspects).
+
+## 6. Preferred Language for Interaction
+
+*   Please primarily use **中文 (Chinese)** for explanations and discussions.
+*   Code (variables, functions, comments, etc.) and technical file contents (YAML, Dockerfile) **MUST** be in **English**. 

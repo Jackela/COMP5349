@@ -165,28 +165,28 @@ class TestGalleryRoute:
         return [
             {
                 'id': 1, 
-                'original_s3_key': 'uploads/test1.jpg', 
-                'thumbnail_s3_key': 'thumbnails/test1.jpg',
-                'caption': 'A beautiful sunset', 
-                'caption_status': 'completed', 
+                's3_key_original': 'uploads/test1.jpg', 
+                's3_key_thumbnail': 'thumbnails/test1.jpg',
+                'annotation': 'A beautiful sunset', 
+                'annotation_status': 'completed', 
                 'thumbnail_status': 'completed',
                 'uploaded_at': datetime(2024, 3, 20, 10, 0, 0)
             },
             {
                 'id': 2, 
-                'original_s3_key': 'uploads/test2.jpg', 
-                'thumbnail_s3_key': 'thumbnails/test2.jpg', 
-                'caption': None, 
-                'caption_status': 'pending', 
+                's3_key_original': 'uploads/test2.jpg', 
+                's3_key_thumbnail': 'thumbnails/test2.jpg', 
+                'annotation': None, 
+                'annotation_status': 'pending', 
                 'thumbnail_status': 'pending',
                 'uploaded_at': datetime(2024, 3, 20, 10, 1, 0)
             },
             {
                 'id': 3, 
-                'original_s3_key': 'uploads/test3.jpg', 
-                'thumbnail_s3_key': 'thumbnails/test3.jpg',
-                'caption': 'Failed to generate caption due to API error', # Error message in caption field for failed status
-                'caption_status': 'failed', 
+                's3_key_original': 'uploads/test3.jpg', 
+                's3_key_thumbnail': 'thumbnails/test3.jpg',
+                'annotation': 'Failed to generate caption due to API error', # Error message in annotation field for failed status
+                'annotation_status': 'failed', 
                 'thumbnail_status': 'failed',
                 'uploaded_at': datetime(2024, 3, 20, 10, 2, 0)
             }
@@ -228,21 +228,21 @@ class TestGalleryRoute:
         
         # Check if all image data is present
         for record in mock_image_records:
-            if record['caption_status'] == 'completed':
-                assert record['caption'].encode() in response.data
-            elif record['caption_status'] == 'pending':
+            if record['annotation_status'] == 'completed':
+                assert record['annotation'].encode() in response.data
+            elif record['annotation_status'] == 'pending':
                 assert b"Caption processing..." in response.data
-            elif record['caption_status'] == 'failed':
+            elif record['annotation_status'] == 'failed':
                 assert b"Caption generation failed" in response.data
-                if record['caption']: # Error message is in caption field
-                    assert record['caption'].encode() in response.data
+                if record['annotation']: # Error message is in annotation field
+                    assert record['annotation'].encode() in response.data
             
             # Check for thumbnail status related text or alt text presence
             if record['thumbnail_status'] == 'completed':
-                # For completed thumbnails, original_s3_key should be in alt text
-                alt_text_expected = f"Thumbnail for {record['original_s3_key']}".encode()
+                # For completed thumbnails, s3_key_original should be in alt text
+                alt_text_expected = f"Thumbnail for {record['s3_key_original']}".encode()
                 assert alt_text_expected in response.data
-                assert record['original_s3_key'].encode() in response.data # ADD: Check key here as part of alt text
+                assert record['s3_key_original'].encode() in response.data # ADD: Check key here as part of alt text
             elif record['thumbnail_status'] == 'pending':
                 assert b"Thumbnail processing..." in response.data
             elif record['thumbnail_status'] == 'failed':
@@ -311,19 +311,19 @@ class TestGalleryRoute:
         # Assert
         assert response.status_code == 200
         
-        # Verify successful images are still rendered (their S3 keys should be in the HTML)
-        # For test1.jpg (thumbnail_status: 'completed'), its original_s3_key is in alt text.
-        assert f"alt=\"Thumbnail for {mock_image_records[0]['original_s3_key']}\"".encode() in response.data
+        # Verify successful images are still rendered (their s3_key_original should be in the HTML)
+        # For test1.jpg (thumbnail_status: 'completed'), its s3_key_original is in alt text.
+        assert f"alt=\"Thumbnail for {mock_image_records[0]['s3_key_original']}\"".encode() in response.data
         
-        # For test3.jpg (thumbnail_status: 'failed'), its original_s3_key should be in the href for 'View Original'.
+        # For test3.jpg (thumbnail_status: 'failed'), its s3_key_original should be in the href for 'View Original'.
         # The mock_generate_presigned_url generates a URL like f'http://mock.s3/{bucket}/{s3_key}'
-        expected_href_test3 = f"href=\"http://mock.s3/{mock_s3_client.return_value.split('/')[2]}/{mock_image_records[2]['original_s3_key']}\"".encode()
+        expected_href_test3 = f"href=\"http://mock.s3/{mock_s3_client.return_value.split('/')[2]}/{mock_image_records[2]['s3_key_original']}\"".encode()
         # Note: This assumes mock_s3_client.return_value is somewhat indicative of the bucket, which is not ideal.
-        # A better way would be to check for a part of the S3 key in a link.
-        assert mock_image_records[2]['original_s3_key'].encode() in response.data # Check if the key itself is present, likely in a link
+        # A better way would be to check for a part of the s3_key_original in a link.
+        assert mock_image_records[2]['s3_key_original'].encode() in response.data # Check if the key itself is present, likely in a link
 
         # Verify failed image (uploads/test2.jpg) is handled gracefully.
-        # Its original_s3_key ('uploads/test2.jpg') will likely NOT be in the response data directly,
+        # Its s3_key_original ('uploads/test2.jpg') will likely NOT be in the response data directly,
         # as its original_image_url and thumbnail_image_url generation fails or is pending.
         # Instead, check for the 'pending' status message for its thumbnail.
         # mock_image_records[1] corresponds to test2.jpg and has thumbnail_status: 'pending'
@@ -348,16 +348,16 @@ class TestGalleryRoute:
         
         # Check status indicators and messages based on gallery.html
         # mock_image_records[0] is 'completed'
-        assert mock_image_records[0]['caption'].encode() in response.data # Actual caption for completed
-        assert f"alt=\"Thumbnail for {mock_image_records[0]['original_s3_key']}\"".encode() in response.data
+        assert mock_image_records[0]['annotation'].encode() in response.data # Actual annotation for completed
+        assert f"alt=\"Thumbnail for {mock_image_records[0]['s3_key_original']}\"".encode() in response.data
 
         # mock_image_records[1] is 'pending'
-        assert b"Caption processing..." in response.data # Text for pending caption
+        assert b"Caption processing..." in response.data # Text for pending annotation
         assert b"Thumbnail processing..." in response.data # Text for pending thumbnail
 
         # mock_image_records[2] is 'failed'
-        assert b"Caption generation failed" in response.data # Text for failed caption
-        assert mock_image_records[2]['caption'].encode() in response.data # Error detail for failed caption
+        assert b"Caption generation failed" in response.data # Text for failed annotation
+        assert mock_image_records[2]['annotation'].encode() in response.data # Error detail for failed annotation
         assert b"Thumbnail generation failed" in response.data # Text for failed thumbnail
         
         # The old assertions for b'completed', b'pending', b'failed' text might fail 

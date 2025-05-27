@@ -1,0 +1,329 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  CloudFormation template for deploying the Web Application (Flask App)
+  on EC2 instances within an Auto Scaling Group, fronted by an Application Load Balancer.
+  Depends on the ECR Repositories stack (00), Network (01) and Application Storage (02) stacks.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: "comp5349a2"
+    Description: An environment name prefixed to resource names.
+
+  ECRStackName:
+    Type: String
+    Default: "ImageAnnotation-ECR" # Assumed name for the ECR stack, update if different
+    Description: Name of the CloudFormation stack that created the ECR repositories.
+
+  NetworkStackName:
+    Type: String
+    Default: "ImageAnnotation-Network"
+    Description: Name of the CloudFormation stack that created VPC and network resources.
+
+  AppStorageStackName:
+    Type: String
+    Default: "ImageAnnotation-App-S3RDS"
+    Description: Name of the CloudFormation stack that created S3 buckets and RDS.
+
+  LabRoleArn: # Using the direct ARN as it's known and fixed in the lab environment
+    Type: String
+    Default: "arn:aws:iam::032664865485:role/LabRole" # Replace with your actual LabRole ARN if different
+    Description: ARN of the pre-configured LabRole to be used by EC2 instances.
+
+  WebAppImageUri:
+    Type: String
+    Description: >
+      Full ECR Image URI (including tag or SHA256 digest) for the Web Application Docker image.
+      The ECR repository itself (e.g., comp5349a2-web-app) is created by the ECR Stack.
+      Example: 032664865485.dkr.ecr.us-east-1.amazonaws.com/comp5349a2-web-app:latest
+    # Add a sensible default or leave it blank to force user input
+    # Default: "032664865485.dkr.ecr.us-east-1.amazonaws.com/comp5349a2-web-app:latest" # Replace with your actual ECR image URI
+
+  InstanceType:
+    Type: String
+    Default: "t3.micro"
+    Description: EC2 instance type for the web application.
+    AllowedValues:
+      - t2.micro
+      - t3.micro
+      - t3.small
+      - m5.large # Add more as needed
+
+  AsgMinSize:
+    Type: Number
+    Default: 1
+    Description: Minimum number of instances in the Auto Scaling Group.
+  
+  AsgMaxSize:
+    Type: Number
+    Default: 2 # As per requirement: maximum capacity greater than 1
+    Description: Maximum number of instances in the Auto Scaling Group.
+
+  AsgDesiredCapacity:
+    Type: Number
+    Default: 1
+    Description: Desired number of instances in the Auto Scaling Group.
+
+  WebServerPort:
+    Type: Number
+    Default: 5000 # Matches the PORT env var in web_app/Dockerfile
+    Description: Port on which the web server inside the Docker container is listening.
+  
+  FlaskSecretKey:
+    Type: String
+    Description: Secret key for the Flask application.
+    NoEcho: true
+    MinLength: 16
+    Default: "a_very_secure_production_secret_key_please_change" # User should override this
+
+  DBMasterUsername: # This parameter is for UserData, must match AppStorageStack input
+    Type: String
+    Default: "dbadmin" 
+    Description: "Database Master Username (must match the one used for RDS creation in AppStorageStack)"
+  
+  DBMasterUserPassword: # This parameter is for UserData, must match AppStorageStack input
+    Type: String
+    Description: "Database Master Password (must match the one used for RDS creation in AppStorageStack)"
+    NoEcho: true
+
+  WebAppLogLevel:
+    Type: String
+    Default: "INFO"
+    Description: Log level for the Web application.
+    AllowedValues: ["DEBUG", "INFO", "WARNING", "ERROR"]
+
+Resources:
+  # IAM Instance Profile for EC2 instances to use LabRole
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub "${EnvironmentName}-EC2-InstanceProfile"
+      Roles:
+        - !Select [1, !Split ['/', !Ref LabRoleArn]] # Extracts RoleName from ARN
+
+  # Security Group Ingress Rule for DB Security Group to allow EC2 access
+  DBSecurityGroupIngressFromEC2:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !ImportValue
+        'Fn::Sub': '${NetworkStackName}-DBSecurityGroupID'
+      IpProtocol: tcp
+      FromPort: 3306
+      ToPort: 3306
+      SourceSecurityGroupId: !ImportValue
+        'Fn::Sub': '${NetworkStackName}-EC2InstanceSecurityGroupID'
+      Description: "Allow MySQL traffic from EC2 instances to RDS"
+
+  EC2SecurityGroupIngressFromALB:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !ImportValue
+        'Fn::Sub': '${NetworkStackName}-EC2InstanceSecurityGroupID'
+      IpProtocol: tcp
+      FromPort: !Ref WebServerPort
+      ToPort: !Ref WebServerPort
+      SourceSecurityGroupId: !ImportValue
+        'Fn::Sub': '${NetworkStackName}-ALBSecurityGroupID'
+      Description: "Allow traffic from ALB on the web server port"
+
+  # ALB Target Group
+  ALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "${EnvironmentName}-WebApp-TG"
+      VpcId: !ImportValue
+        'Fn::Sub': '${NetworkStackName}-VPCID'
+      Port: !Ref WebServerPort
+      Protocol: HTTP
+      Matcher:
+        HttpCode: "200" # Health check expects HTTP 200
+      HealthCheckPath: "/health"
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      HealthCheckPort: !Ref WebServerPort # Health check on the actual app port
+      TargetType: instance
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName} WebApp Target Group"
+
+  # Application Load Balancer
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "${EnvironmentName}-WebApp-ALB"
+      Scheme: internet-facing
+      Subnets: # ALB in public subnets
+        - !ImportValue
+          'Fn::Sub': '${NetworkStackName}-PublicSubnet1ID'
+        - !ImportValue
+          'Fn::Sub': '${NetworkStackName}-PublicSubnet2ID'
+      SecurityGroups:
+        - !ImportValue
+          'Fn::Sub': '${NetworkStackName}-ALBSecurityGroupID'
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName} WebApp ALB"
+
+  # ALB Listener for HTTP traffic on port 80
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup
+
+  # Launch Template for EC2 instances
+  EC2LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub "${EnvironmentName}-WebApp-LT"
+      LaunchTemplateData:
+        ImageId: "ami-01f5a0b78d6089704" # Amazon Linux 2 AMI (Generic, us-east-1). Update if needed.
+        InstanceType: !Ref InstanceType
+        IamInstanceProfile:
+          Arn: !GetAtt EC2InstanceProfile.Arn
+        SecurityGroupIds:
+          - !ImportValue
+            'Fn::Sub': '${NetworkStackName}-EC2InstanceSecurityGroupID'
+        UserData:
+          Fn::Base64: !Sub
+            - |
+              #!/bin/bash -xe
+              # Install Docker
+              yum update -y
+              amazon-linux-extras install docker -y
+              systemctl start docker
+              systemctl enable docker
+              usermod -a -G docker ec2-user
+
+              # Install AWS CLI v2 (retained for ECR login and potential debugging)
+              curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+              unzip awscliv2.zip
+              ./aws/install
+
+              # ECR Login (LabRole has AmazonEC2ContainerRegistryReadOnly which is sufficient)
+              aws ecr get-login-password --region ${AWS::Region} | docker login --username AWS --password-stdin ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com
+
+              # Pull the Docker image from ECR
+              docker pull ${FullWebAppImageUri}
+
+              # Run the Docker container with environment variables injected by CloudFormation
+              docker run -d -p ${LocalWebServerPort}:${LocalWebServerPort} \
+                -e PORT=${LocalWebServerPort} \
+                -e FLASK_SECRET_KEY='${LocalFlaskSecretKey}' \
+                -e S3_IMAGE_BUCKET=${S3ImageBucketValue} \
+                -e S3_THUMBNAIL_BUCKET=${S3ThumbnailBucketValue} \
+                -e DB_HOST=${DBHostValue} \
+                -e DB_USER='${LocalDBMasterUsername}' \
+                -e DB_PASSWORD='${LocalDBMasterPassword}' \
+                -e DB_NAME=${DBNameValue} \
+                -e DB_PORT=${DBPortValue} \
+                -e LOG_LEVEL='${LocalWebAppLogLevelValue}' \
+                ${FullWebAppImageUri}
+            - LocalWebServerPort: !Ref WebServerPort
+              LocalFlaskSecretKey: !Ref FlaskSecretKey
+              S3ImageBucketValue: !ImportValue 
+                'Fn::Sub': '${AppStorageStackName}-OriginalImagesBucketName'
+              S3ThumbnailBucketValue: !ImportValue 
+                'Fn::Sub': '${AppStorageStackName}-ThumbnailsBucketName'
+              DBHostValue: !ImportValue 
+                'Fn::Sub': '${AppStorageStackName}-RDSEndpointAddress'
+              LocalDBMasterUsername: !Ref DBMasterUsername # Parameter from this stack
+              LocalDBMasterPassword: !Ref DBMasterUserPassword # Parameter from this stack
+              DBNameValue: !ImportValue 
+                'Fn::Sub': '${AppStorageStackName}-RDSDatabaseName'
+              DBPortValue: !ImportValue 
+                'Fn::Sub': '${AppStorageStackName}-RDSEndpointPort'
+              LocalWebAppLogLevelValue: !Ref WebAppLogLevel # New parameter
+              FullWebAppImageUri: !Ref WebAppImageUri # Parameter from this stack
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize: 8 # GiB
+              VolumeType: gp3
+              DeleteOnTermination: true
+  
+  # CloudWatch Log Group for WebApp container logs
+  WebAppLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "${EnvironmentName}-WebApp-Logs"
+      RetentionInDays: 7
+
+  # Auto Scaling Group
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Sub "${EnvironmentName}-WebApp-ASG"
+      LaunchTemplate:
+        LaunchTemplateId: !Ref EC2LaunchTemplate
+        Version: !GetAtt EC2LaunchTemplate.LatestVersionNumber
+      MinSize: !Ref AsgMinSize
+      MaxSize: !Ref AsgMaxSize
+      DesiredCapacity: !Ref AsgDesiredCapacity
+      VPCZoneIdentifier: # EC2 instances in private subnets
+        - !ImportValue
+          'Fn::Sub': '${NetworkStackName}-PrivateSubnet1ID'
+        - !ImportValue
+          'Fn::Sub': '${NetworkStackName}-PrivateSubnet2ID'
+      TargetGroupARNs:
+        - !Ref ALBTargetGroup
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 300 # Give time for docker pull and container start
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName} WebApp Instance"
+          PropagateAtLaunch: true
+
+  # Scaling Policy - Example: Scale out based on CPU Utilization
+  ScaleOutPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+        TargetValue: 70.0 # Target 70% CPU utilization
+
+Outputs:
+  WebAppALBDNSName:
+    Description: DNS name of the Application Load Balancer for the web application.
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+    Export:
+      Name: !Sub "${AWS::StackName}-WebAppALBDNSName"
+
+  WebAppALBHostedZoneId:
+    Description: Hosted Zone ID of the Application Load Balancer.
+    Value: !GetAtt ApplicationLoadBalancer.CanonicalHostedZoneID
+    Export:
+      Name: !Sub "${AWS::StackName}-WebAppALBHostedZoneId"
+
+  ALBTargetGroupName:
+    Description: Name of the ALB Target Group.
+    Value: !Ref ALBTargetGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-ALBTargetGroupName"
+
+  EC2LaunchTemplateId:
+    Description: ID of the EC2 Launch Template.
+    Value: !Ref EC2LaunchTemplate
+    Export:
+      Name: !Sub "${AWS::StackName}-EC2LaunchTemplateId"
+
+  AutoScalingGroupName:
+    Description: Name of the Auto Scaling Group.
+    Value: !Ref AutoScalingGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-AutoScalingGroupName"
+
+  WebAppLogGroupName:
+    Description: Name of the CloudWatch LogGroup for WebApp container logs
+    Value: !Ref WebAppLogGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-WebAppLogGroupName" 

@@ -2,18 +2,33 @@
 import os
 import uuid
 import logging
-from flask import Flask, request, redirect, url_for, render_template, flash, g
+from flask import Flask, request, redirect, url_for, render_template, flash, g, jsonify
 from werkzeug.utils import secure_filename
-from .utils import s3_utils, db_utils
-from .utils.custom_exceptions import (
-    COMP5349A2Error,
-    S3InteractionError,
-    DatabaseError,
-    InvalidInputError,
-    ConfigurationError,
-    GeminiAPIError,
-    ImageProcessingError
-)
+# Smart import handling - works in both development and production
+try:
+    # Try relative imports first (for proper package structure)
+    from .utils import s3_utils, db_utils
+    from .utils.custom_exceptions import (
+        COMP5349A2Error,
+        S3InteractionError,
+        DatabaseError,
+        InvalidInputError,
+        ConfigurationError,
+        GeminiAPIError,
+        ImageProcessingError
+    )
+except ImportError:
+    # Fallback to absolute imports (for direct execution by Gunicorn)
+    from utils import s3_utils, db_utils
+    from utils.custom_exceptions import (
+        COMP5349A2Error,
+        S3InteractionError,
+        DatabaseError,
+        InvalidInputError,
+        ConfigurationError,
+        GeminiAPIError,
+        ImageProcessingError
+    )
 import datetime
 
 # Flask app initialization
@@ -21,6 +36,7 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('FLASK_SECRET_KEY', 'a_very_secret_dev_key_for_development_only')
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16 MB
 app.config['S3_IMAGE_BUCKET'] = os.environ.get('S3_IMAGE_BUCKET')
+app.config['S3_THUMBNAIL_BUCKET'] = os.environ.get('S3_THUMBNAIL_BUCKET')
 app.config['ALLOWED_EXTENSIONS'] = {'png', 'jpg', 'jpeg', 'gif'}
 
 # Logging configuration
@@ -178,7 +194,7 @@ def upload_post():
     content_type = get_mime_type(filename)
     try:
         s3_utils.upload_file_to_s3(file, app.config['S3_IMAGE_BUCKET'], s3_key, content_type, request_id=request_id)
-        db_utils.save_initial_image_meta(g.db_conn, s3_key, request_id=request_id)
+        db_utils.save_initial_image_meta(g.db_conn, s3_key, filename, request_id=request_id)
         flash(f"Image '{filename}' uploaded successfully and is being processed.", 'success')
         return redirect(url_for('gallery_get'))
     except (S3InteractionError, DatabaseError, InvalidInputError, ConfigurationError) as e:
@@ -206,23 +222,23 @@ def gallery_get():
             img_data['thumbnail_image_url'] = None
             # Generate presigned URLs, handle failures gracefully
             try:
-                if record.get('original_s3_key'):
+                if record.get('s3_key_original'):
                     img_data['original_image_url'] = s3_utils.generate_presigned_url(
                         app.config['S3_IMAGE_BUCKET'],
-                        record['original_s3_key'],
+                        record['s3_key_original'],
                         request_id=request_id
                     )
             except S3InteractionError as s3_e_presign:
-                app.logger.error(f"Failed to generate presigned URL for S3 key {record.get('original_s3_key')}: {s3_e_presign.message}", extra={'request_id': request_id})
+                app.logger.error(f"Failed to generate presigned URL for S3 key {record.get('s3_key_original')}: {s3_e_presign.message}", extra={'request_id': request_id})
             try:
-                if record.get('thumbnail_s3_key') and record.get('thumbnail_status') == 'completed':
+                if record.get('s3_key_thumbnail') and record.get('thumbnail_status') == 'completed':
                     img_data['thumbnail_image_url'] = s3_utils.generate_presigned_url(
-                        app.config['S3_IMAGE_BUCKET'],
-                        record['thumbnail_s3_key'],
+                        app.config['S3_THUMBNAIL_BUCKET'],
+                        record['s3_key_thumbnail'],
                         request_id=request_id
                     )
             except S3InteractionError as s3_e_presign:
-                app.logger.error(f"Failed to generate presigned URL for S3 key {record.get('thumbnail_s3_key')}: {s3_e_presign.message}", extra={'request_id': request_id})
+                app.logger.error(f"Failed to generate presigned URL for S3 key {record.get('s3_key_thumbnail')}: {s3_e_presign.message}", extra={'request_id': request_id})
             processed_images.append(img_data)
         app.logger.info(f"Successfully prepared {len(processed_images)} images for gallery display.", extra={'request_id': request_id})
         return render_template('gallery.html', images=processed_images)
@@ -230,6 +246,61 @@ def gallery_get():
         app.logger.error(f"Failed to load gallery: {e.message}", exc_info=True, extra={'request_id': request_id, 'error_code': getattr(e, 'error_code', None)})
         flash(f"Could not load gallery: {e.message}", 'danger')
         return render_template('gallery.html', images=[], error_message=str(e.message)), 500
+
+@app.route('/api/image_status/<int:image_id>')
+def image_status_api(image_id):
+    """
+    API endpoint for AJAX polling to check the processing status of a single image.
+    Returns JSON with current processing status, thumbnail URL, and annotation.
+    """
+    request_id = getattr(g, 'request_id', 'N/A')
+    app.logger.info(f"GET /api/image_status/{image_id} - AJAX status check request", extra={'request_id': request_id})
+    
+    if g.db_conn is None:
+        app.logger.error("Database connection unavailable for image status API", extra={'request_id': request_id})
+        return jsonify({'status': 'error', 'error': 'Database connection unavailable'}), 500
+    
+    try:
+        image_data = db_utils.get_image_by_id(g.db_conn, image_id, request_id=request_id)
+        if not image_data:
+            app.logger.warning(f"Image with ID {image_id} not found", extra={'request_id': request_id})
+            return jsonify({'status': 'not_found', 'error': 'Image not found'}), 404
+        
+        # Determine overall processing status
+        thumbnail_completed = image_data.get('thumbnail_status') == 'completed'
+        annotation_completed = image_data.get('annotation_status') == 'completed'
+        
+        # If both are completed, the overall status is 'completed'
+        overall_status = 'completed' if (thumbnail_completed and annotation_completed) else 'processing'
+        
+        # Prepare response data
+        response_data = {
+            'id': image_data['id'],
+            'filename': image_data['filename'],
+            'overall_status': overall_status,
+            'thumbnail_status': image_data.get('thumbnail_status', 'pending'),
+            'annotation_status': image_data.get('annotation_status', 'pending'),
+            'thumbnail_url': None,
+            'annotation': image_data.get('annotation')
+        }
+        
+        # Generate presigned URL for thumbnail if available
+        if image_data.get('s3_key_thumbnail') and thumbnail_completed:
+            try:
+                response_data['thumbnail_url'] = s3_utils.generate_presigned_url(
+                    app.config['S3_THUMBNAIL_BUCKET'],
+                    image_data['s3_key_thumbnail'],
+                    request_id=request_id
+                )
+            except S3InteractionError as s3_e:
+                app.logger.error(f"Failed to generate presigned URL for thumbnail {image_data.get('s3_key_thumbnail')}: {s3_e.message}", extra={'request_id': request_id})
+        
+        app.logger.info(f"Successfully returned status for image {image_id}: {overall_status}", extra={'request_id': request_id})
+        return jsonify(response_data)
+        
+    except (DatabaseError, InvalidInputError) as e:
+        app.logger.error(f"Error fetching status for image {image_id}: {e.message}", exc_info=True, extra={'request_id': request_id, 'error_code': getattr(e, 'error_code', None)})
+        return jsonify({'status': 'error', 'error': str(e.message)}), 500
 
 @app.route('/health', methods=['GET'])
 def health_get():

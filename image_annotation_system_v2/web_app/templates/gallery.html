@@ -18,11 +18,16 @@
     {% else %}
         <div class="gallery-grid">
             {% for image in images %}
-                <div class="gallery-item">
-                    <div class="image-container">
+                {% set is_processing = (image.thumbnail_status == 'pending' or image.annotation_status == 'pending') %}
+                <div class="gallery-item" 
+                     id="gallery-item-{{ image.id }}" 
+                     data-image-id="{{ image.id }}" 
+                     data-processing-status="{{ 'processing' if is_processing else 'completed' }}">
+                    
+                    <div class="image-container" id="image-container-{{ image.id }}">
                         {% if image.thumbnail_image_url and image.thumbnail_status == 'completed' %}
                             <img src="{{ image.thumbnail_image_url }}" 
-                                 alt="Thumbnail for {{ image.original_s3_key }}" 
+                                 alt="Thumbnail for {{ image.s3_key_original }}" 
                                  class="thumbnail">
                         {% elif image.thumbnail_status == 'pending' %}
                             <div class="processing-placeholder">
@@ -41,16 +46,16 @@
                     </div>
 
                     <div class="image-info">
-                        <div class="caption-section">
-                            {% if image.caption and image.caption_status == 'completed' %}
-                                <p class="caption">{{ image.caption }}</p>
-                            {% elif image.caption_status == 'pending' %}
+                        <div class="caption-section" id="caption-section-{{ image.id }}">
+                            {% if image.annotation and image.annotation_status == 'completed' %}
+                                <p class="caption">{{ image.annotation }}</p>
+                            {% elif image.annotation_status == 'pending' %}
                                 <p class="caption-status pending">Caption processing...</p>
-                            {% elif image.caption_status == 'failed' %}
+                            {% elif image.annotation_status == 'failed' %}
                                 <p class="caption-status failed">
                                     Caption generation failed
-                                    {% if image.caption %}
-                                        <br><span class="error-detail">{{ image.caption }}</span>
+                                    {% if image.annotation %}
+                                        <br><span class="error-detail">{{ image.annotation }}</span>
                                     {% endif %}
                                 </p>
                             {% else %}
@@ -68,6 +73,120 @@
                 </div>
             {% endfor %}
         </div>
+
+        <!-- AJAX Polling JavaScript -->
+        <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            const pollers = {}; // Object to store interval IDs for each image
+            const MAX_POLL_ATTEMPTS = 120; // Maximum polling attempts (10 minutes at 5-second intervals)
+            const POLL_INTERVAL = 5000; // 5 seconds
+
+            // Function to poll the status of a specific image
+            function pollImageStatus(imageId) {
+                let pollCount = 0;
+
+                const poller = setInterval(() => {
+                    pollCount++;
+                    
+                    // Stop polling after max attempts to prevent infinite polling
+                    if (pollCount > MAX_POLL_ATTEMPTS) {
+                        console.log(`Stopping polling for image ${imageId} after ${MAX_POLL_ATTEMPTS} attempts`);
+                        clearInterval(pollers[imageId]);
+                        delete pollers[imageId];
+                        return;
+                    }
+
+                    fetch(`/api/image_status/${imageId}`)
+                        .then(response => {
+                            if (!response.ok) {
+                                throw new Error(`HTTP error! status: ${response.status}`);
+                            }
+                            return response.json();
+                        })
+                        .then(data => {
+                            console.log(`Polling image ${imageId}: ${data.overall_status}`);
+                            
+                            // If processing is completed, update the UI and stop polling
+                            if (data.overall_status === 'completed') {
+                                updateImageDisplay(data);
+                                clearInterval(pollers[imageId]);
+                                delete pollers[imageId];
+                                console.log(`Image ${imageId} processing completed. Polling stopped.`);
+                            }
+                        })
+                        .catch(error => {
+                            console.error(`Error polling image ${imageId}:`, error);
+                            
+                            // Stop polling on error after a few attempts
+                            if (pollCount > 3) {
+                                clearInterval(pollers[imageId]);
+                                delete pollers[imageId];
+                                console.log(`Stopped polling image ${imageId} due to persistent errors.`);
+                            }
+                        });
+                }, POLL_INTERVAL);
+
+                pollers[imageId] = poller;
+            }
+
+            // Function to update the image display with new data
+            function updateImageDisplay(data) {
+                const galleryItem = document.getElementById(`gallery-item-${data.id}`);
+                const imageContainer = document.getElementById(`image-container-${data.id}`);
+                const captionSection = document.getElementById(`caption-section-${data.id}`);
+
+                if (!galleryItem || !imageContainer || !captionSection) {
+                    console.error(`Could not find DOM elements for image ${data.id}`);
+                    return;
+                }
+
+                // Update thumbnail
+                if (data.thumbnail_url && data.thumbnail_status === 'completed') {
+                    imageContainer.innerHTML = `
+                        <img src="${data.thumbnail_url}" 
+                             alt="Thumbnail for ${data.filename}" 
+                             class="thumbnail">
+                    `;
+                } else if (data.thumbnail_status === 'failed') {
+                    imageContainer.innerHTML = `
+                        <div class="error-placeholder">
+                            <p>Thumbnail generation failed</p>
+                        </div>
+                    `;
+                }
+
+                // Update caption
+                if (data.annotation && data.annotation_status === 'completed') {
+                    captionSection.innerHTML = `<p class="caption">${data.annotation}</p>`;
+                } else if (data.annotation_status === 'failed') {
+                    captionSection.innerHTML = `
+                        <p class="caption-status failed">Caption generation failed</p>
+                    `;
+                }
+
+                // Update the gallery item's data attribute
+                galleryItem.setAttribute('data-processing-status', 'completed');
+            }
+
+            // Start polling for all images that are still processing
+            const processingItems = document.querySelectorAll('.gallery-item[data-processing-status="processing"]');
+            
+            processingItems.forEach(item => {
+                const imageId = item.getAttribute('data-image-id');
+                if (imageId) {
+                    console.log(`Starting polling for image ${imageId}`);
+                    pollImageStatus(parseInt(imageId));
+                }
+            });
+
+            // Log how many items are being polled
+            if (processingItems.length > 0) {
+                console.log(`Started polling for ${processingItems.length} images`);
+            } else {
+                console.log('No images currently processing');
+            }
+        });
+        </script>
     {% endif %}
 </div>
 {% endblock %} 

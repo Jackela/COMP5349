@@ -1,0 +1,257 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  CloudFormation stack for deploying Lambda functions for the Image Annotation application
+  using Container Images. This stack depends on the ECR Repositories stack (00),
+  Network stack (01), and Application Storage stack (02).
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: "comp5349a2"
+    Description: An environment name prefixed to resource names.
+
+  ECRStackName:
+    Type: String
+    Default: "ImageAnnotation-ECR" # Assumed name for the ECR stack, update if different
+    Description: Name of the CloudFormation stack that created the ECR repositories.
+
+  NetworkStackName:
+    Type: String
+    Default: "ImageAnnotation-Network"
+    Description: Name of the CloudFormation stack that created VPC and network resources.
+
+  AppStorageStackName:
+    Type: String
+    Default: "ImageAnnotation-App-S3RDS"
+    Description: Name of the CloudFormation stack that created S3 buckets and RDS.
+
+  LabRoleArn:
+    Type: String
+    Default: "arn:aws:iam::032664865485:role/LabRole"
+    Description: ARN of the pre-configured LabRole to be used by Lambda functions.
+
+  GeminiApiKey:
+    Type: String
+    Description: API Key for Google Gemini API.
+    NoEcho: true
+
+  AnnotationLambdaImageUri:
+    Type: String
+    Description: >
+      Full ECR Image URI (including tag or SHA256 digest) for the Annotation Lambda function. 
+      The ECR repository itself (e.g., comp5349a2-annotation-lambda) is created by the ECR Stack.
+    Default: "032664865485.dkr.ecr.us-east-1.amazonaws.com/comp5349a2-annotation-lambda@sha256:30c89ee6303d67ee7497ab7c0c239d0853d3e1deddcb6de568105e875d337994"
+
+  ThumbnailLambdaImageUri:
+    Type: String
+    Description: >
+      Full ECR Image URI (including tag or SHA256 digest) for the Thumbnail Lambda function. 
+      The ECR repository itself (e.g., comp5349a2-thumbnail-lambda) is created by the ECR Stack.
+    Default: "032664865485.dkr.ecr.us-east-1.amazonaws.com/comp5349a2-thumbnail-lambda@sha256:a9d7eac260d8f8a2494689c964a4759adf7a4fc84faded034c411a99e1975bf1"
+
+  GeminiModelName:
+    Type: String
+    Description: Model name for Gemini API.
+    Default: "gemini-1.5-flash-latest"
+
+  GeminiPrompt:
+    Type: String
+    Description: Prompt for Gemini API.
+    Default: "Describe this image in detail, focusing on objects, actions, and context. If the image quality is too low or content is unidentifiable, state that clearly."
+
+  AnnotationLambdaTimeout:
+    Type: Number
+    Default: 60
+    Description: Timeout for the annotation Lambda (seconds).
+  
+  AnnotationLambdaMemorySize:
+    Type: Number
+    Default: 512
+    Description: Memory size for the annotation Lambda (MB).
+
+  ThumbnailTargetWidth:
+    Type: Number
+    Default: 128
+    Description: Target width for thumbnails.
+  
+  ThumbnailTargetHeight:
+    Type: Number
+    Default: 128
+    Description: Target height for thumbnails.
+  
+  ThumbnailKeyPrefix:
+    Type: String
+    Default: "thumbnails/"
+    Description: S3 key prefix for storing thumbnails in the thumbnails bucket.
+
+  ThumbnailLambdaTimeout:
+    Type: Number
+    Default: 30
+    Description: Timeout for the thumbnail Lambda (seconds).
+  
+  ThumbnailLambdaMemorySize:
+    Type: Number
+    Default: 256
+    Description: Memory size for the thumbnail Lambda (MB).
+  
+  LambdaLogLevel:
+    Type: String
+    Default: "INFO"
+    Description: Log level for Lambda functions.
+    AllowedValues: ["DEBUG", "INFO", "WARNING", "ERROR"]
+  
+  DBMasterUsername:
+    Type: String
+    Default: "dbadmin" 
+    Description: Database Master Username. Must match the one used for RDS creation.
+  
+  DBMasterUserPassword:
+    Type: String
+    Description: Database Master Password. Must match the one used for RDS creation.
+    NoEcho: true
+
+Resources:
+  AnnotationLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${EnvironmentName}-AnnotationLambda"
+      PackageType: Image
+      Role: !Ref LabRoleArn
+      Code:
+        ImageUri: !Ref AnnotationLambdaImageUri
+      Timeout: !Ref AnnotationLambdaTimeout
+      MemorySize: !Ref AnnotationLambdaMemorySize
+      Environment:
+        Variables:
+          DB_HOST: !ImportValue 
+            'Fn::Sub': '${AppStorageStackName}-RDSEndpointAddress'
+          DB_USER: !Ref DBMasterUsername
+          DB_PASSWORD: !Ref DBMasterUserPassword
+          DB_NAME: !ImportValue
+            'Fn::Sub': '${AppStorageStackName}-RDSDatabaseName'
+          DB_PORT: !ImportValue
+            'Fn::Sub': '${AppStorageStackName}-RDSEndpointPort'
+          GEMINI_API_KEY: !Ref GeminiApiKey
+          GEMINI_MODEL_NAME: !Ref GeminiModelName
+          GEMINI_PROMPT: !Ref GeminiPrompt
+          LOG_LEVEL: !Ref LambdaLogLevel
+          S3_ORIGINAL_IMAGES_BUCKET_NAME: !ImportValue
+            'Fn::Sub': '${AppStorageStackName}-OriginalImagesBucketName'
+      VpcConfig:
+        SecurityGroupIds:
+          - !ImportValue 
+            'Fn::Sub': '${NetworkStackName}-LambdaSecurityGroupID'
+        SubnetIds:
+          - !ImportValue 
+            'Fn::Sub': '${NetworkStackName}-PrivateSubnet1ID'
+          - !ImportValue 
+            'Fn::Sub': '${NetworkStackName}-PrivateSubnet2ID'
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName} Annotation Lambda"
+
+  ThumbnailLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${EnvironmentName}-ThumbnailLambda"
+      PackageType: Image
+      Role: !Ref LabRoleArn
+      Code:
+        ImageUri: !Ref ThumbnailLambdaImageUri
+      Timeout: !Ref ThumbnailLambdaTimeout
+      MemorySize: !Ref ThumbnailLambdaMemorySize
+      Environment:
+        Variables:
+          DB_HOST: !ImportValue
+            'Fn::Sub': '${AppStorageStackName}-RDSEndpointAddress'
+          DB_USER: !Ref DBMasterUsername
+          DB_PASSWORD: !Ref DBMasterUserPassword
+          DB_NAME: !ImportValue
+            'Fn::Sub': '${AppStorageStackName}-RDSDatabaseName'
+          DB_PORT: !ImportValue
+            'Fn::Sub': '${AppStorageStackName}-RDSEndpointPort'
+          S3_ORIGINAL_IMAGES_BUCKET_NAME: !ImportValue
+            'Fn::Sub': '${AppStorageStackName}-OriginalImagesBucketName'
+          THUMBNAIL_BUCKET_NAME: !ImportValue # Using ImportValue now
+            'Fn::Sub': '${AppStorageStackName}-ThumbnailsBucketName'
+          TARGET_WIDTH: "128" # Retaining as direct values as per original logic
+          TARGET_HEIGHT: "128"
+          THUMBNAIL_KEY_PREFIX: "thumbnails/"
+          LOG_LEVEL: !Ref LambdaLogLevel
+      VpcConfig:
+        SecurityGroupIds:
+          - !ImportValue 
+            'Fn::Sub': '${NetworkStackName}-LambdaSecurityGroupID'
+        SubnetIds:
+          - !ImportValue 
+            'Fn::Sub': '${NetworkStackName}-PrivateSubnet1ID'
+          - !ImportValue 
+            'Fn::Sub': '${NetworkStackName}-PrivateSubnet2ID'
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName} Thumbnail Lambda"
+
+  S3UploadEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${EnvironmentName}-S3UploadRule"
+      Description: "Rule to trigger Lambdas when a new object is created in the original images S3 bucket uploads/ prefix"
+      EventPattern:
+        source:
+          - aws.s3
+        detail-type:
+          - "Object Created"
+        detail:
+          bucket:
+            name:
+              - !ImportValue
+                Fn::Sub: "${AppStorageStackName}-OriginalImagesBucketName"
+          object:
+            key:
+              - prefix: "uploads/"
+      Targets:
+        - Arn: !GetAtt AnnotationLambdaFunction.Arn
+          Id: "AnnotationLambdaTarget"
+        - Arn: !GetAtt ThumbnailLambdaFunction.Arn
+          Id: "ThumbnailLambdaTarget"
+
+  AllowEventBridgeToInvokeAnnotationLambda:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt AnnotationLambdaFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt S3UploadEventRule.Arn
+
+  AllowEventBridgeToInvokeThumbnailLambda:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt ThumbnailLambdaFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt S3UploadEventRule.Arn
+
+Outputs:
+  AnnotationLambdaFunctionArn:
+    Description: ARN of the Annotation Lambda function
+    Value: !GetAtt AnnotationLambdaFunction.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-AnnotationLambdaFunctionArn"
+
+  AnnotationLambdaFunctionName:
+    Description: Name of the Annotation Lambda function
+    Value: !Ref AnnotationLambdaFunction
+    Export:
+      Name: !Sub "${AWS::StackName}-AnnotationLambdaFunctionName"
+
+  ThumbnailLambdaFunctionArn:
+    Description: ARN of the Thumbnail Lambda function
+    Value: !GetAtt ThumbnailLambdaFunction.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-ThumbnailLambdaFunctionArn"
+
+  ThumbnailLambdaFunctionName:
+    Description: Name of the Thumbnail Lambda function
+    Value: !Ref ThumbnailLambdaFunction
+    Export:
+      Name: !Sub "${AWS::StackName}-ThumbnailLambdaFunctionName" 

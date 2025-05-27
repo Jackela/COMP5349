@@ -1,0 +1,94 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CloudFormation template for creating ECR Repositories for COMP5349 Assignment 2.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: "comp5349a2"
+    Description: An environment name prefixed to resource names. Used to construct repository names.
+
+  WebAppRepoNameInput:
+    Type: String
+    Default: "web-app" 
+    Description: Base name for the Web Application ECR repository. Combined with EnvironmentName.
+
+  AnnotationLambdaRepoNameInput:
+    Type: String
+    Default: "annotation-lambda"
+    Description: Base name for the Annotation Lambda ECR repository. Combined with EnvironmentName.
+
+  ThumbnailLambdaRepoNameInput:
+    Type: String
+    Default: "thumbnail-lambda"
+    Description: Base name for the Thumbnail Lambda ECR repository. Combined with EnvironmentName.
+
+Resources:
+  WebAppECRRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub "${EnvironmentName}-${WebAppRepoNameInput}" # Results in comp5349a2-web-app
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      ImageTagMutability: MUTABLE # Default is MUTABLE, explicitly stating
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-${WebAppRepoNameInput}"
+
+  AnnotationLambdaECRRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub "${EnvironmentName}-${AnnotationLambdaRepoNameInput}" # Results in comp5349a2-annotation-lambda
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      ImageTagMutability: MUTABLE
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-${AnnotationLambdaRepoNameInput}"
+
+  ThumbnailLambdaECRRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub "${EnvironmentName}-${ThumbnailLambdaRepoNameInput}" # Results in comp5349a2-thumbnail-lambda
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      ImageTagMutability: MUTABLE
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-${ThumbnailLambdaRepoNameInput}"
+
+Outputs:
+  WebAppRepoName:
+    Description: Name of the Web App ECR Repository
+    Value: !Ref WebAppECRRepository
+    Export:
+      Name: !Sub "${AWS::StackName}-WebAppRepoName" # Exports the repository name
+
+  WebAppRepoUri:
+    Description: URI of the Web App ECR Repository
+    Value: !GetAtt WebAppECRRepository.RepositoryUri
+    Export:
+      Name: !Sub "${AWS::StackName}-WebAppRepoUri"
+
+  AnnotationLambdaRepoName:
+    Description: Name of the Annotation Lambda ECR Repository
+    Value: !Ref AnnotationLambdaECRRepository
+    Export:
+      Name: !Sub "${AWS::StackName}-AnnotationLambdaRepoName"
+
+  AnnotationLambdaRepoUri:
+    Description: URI of the Annotation Lambda ECR Repository
+    Value: !GetAtt AnnotationLambdaECRRepository.RepositoryUri
+    Export:
+      Name: !Sub "${AWS::StackName}-AnnotationLambdaRepoUri"
+
+  ThumbnailLambdaRepoName:
+    Description: Name of the Thumbnail Lambda ECR Repository
+    Value: !Ref ThumbnailLambdaECRRepository
+    Export:
+      Name: !Sub "${AWS::StackName}-ThumbnailLambdaRepoName"
+
+  ThumbnailLambdaRepoUri:
+    Description: URI of the Thumbnail Lambda ECR Repository
+    Value: !GetAtt ThumbnailLambdaECRRepository.RepositoryUri
+    Export:
+      Name: !Sub "${AWS::StackName}-ThumbnailLambdaRepoUri" 

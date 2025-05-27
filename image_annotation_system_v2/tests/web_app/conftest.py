@@ -79,6 +79,7 @@ def mock_env_vars():
         'DB_NAME': 'test-db-name',
         'DB_PORT': '3306',
         'S3_IMAGE_BUCKET': 'test-image-bucket',
+        'S3_THUMBNAIL_BUCKET': 'test-thumbnail-bucket',
         'FLASK_SECRET_KEY': 'test-secret-key',
         'LOG_LEVEL': 'DEBUG'
     }):
@@ -111,8 +112,9 @@ def app():
         "WTF_CSRF_ENABLED": False,  # Disable CSRF protection for testing
         "MAX_CONTENT_LENGTH": 16 * 1024 * 1024,  # 16MB
         "ALLOWED_EXTENSIONS": {'png', 'jpg', 'jpeg', 'gif'},
-        # Explicitly set S3_IMAGE_BUCKET here to ensure it's not None
+        # Explicitly set S3 buckets here to ensure they're not None
         "S3_IMAGE_BUCKET": os.environ.get('S3_IMAGE_BUCKET', 'test-image-bucket-fallback'),
+        "S3_THUMBNAIL_BUCKET": os.environ.get('S3_THUMBNAIL_BUCKET', 'test-thumbnail-bucket-fallback'),
         "DB_HOST": os.environ.get('DB_HOST'), # Ensure these are also picked up if mock_env_vars is used
         "DB_USER": os.environ.get('DB_USER'),
         "DB_PASSWORD": os.environ.get('DB_PASSWORD'),

@@ -104,8 +104,8 @@ PROJECT\_PREFIX-COMPONENT\_TYPE-COMPONENT\_NAME-FUNCTION\_NAME (如果适用)。
 * **S3相关：**  
   * S3\_IMAGE\_BUCKET: 存放原始图片和缩略图的主S3桶名。  
 * **Gemini API相关：**  
-  * GEMINI\_API\_KEY: Google Gemini API密钥 (推荐通过Secrets Manager管理)。  
-  * GEMINI\_MODEL\_NAME: 使用的Gemini模型名称 (e.g., gemini-pro-vision)。  
+  * GEMINI\_API\_KEY: Google Gemini API密钥 (推荐通过Secrets Manager管理)。 **注意：项目使用此API Key通过 `google-generativeai` SDK 直接调用Gemini API进行图像理解。**
+  * GEMINI\_MODEL\_NAME: 使用的Gemini模型名称 (e.g., gemini-1.5-flash-latest, gemini-1.0-pro-vision)。
   * GEMINI\_PROMPT: 调用Gemini API时使用的默认提示文本。  
 * **Flask应用相关：**  
   * FLASK\_SECRET\_KEY: Flask应用用于会话管理和flash消息的密钥。  
@@ -116,9 +116,10 @@ PROJECT\_PREFIX-COMPONENT\_TYPE-COMPONENT\_NAME-FUNCTION\_NAME (如果适用)。
 
 ### **5\. Python版本和依赖管理**
 
-* **统一Python版本：** **Python 3.9**。这是AWS Lambda支持较好且稳定的版本。  
+* **统一Python版本：** **Python 3.9**。这是AWS Lambda支持较好且稳定的版本，也是我们Lambda容器镜像的基础镜像所使用的Python版本。  
 * **依赖管理 (requirements.txt)：**  
   * 所有Python依赖项及其版本应在各自模块的 requirements.txt 文件中明确指定。  
+  * 这些 `requirements.txt` 文件将在构建各自Lambda函数的容器镜像时，通过 `Dockerfile` 中的 `pip install -r requirements.txt` 命令被用来安装依赖。  
   * 版本号使用精确指定 \== (例如 boto3==1.28.0, Pillow==9.5.0)，以保证开发、测试和生产环境的一致性，避免因小版本更新引入的意外问题。
 
 ## **二、Web 应用 (web\_app/)**
@@ -641,247 +642,115 @@ Purpose: 定义Flask Web应用，包括路由、请求处理器和整体应用�
 
 对于Lambda函数，数据库连接逻辑将与 web\_app/utils/db\_utils.py 中的类似，但会适配Lambda环境（例如，在handler外部初始化一次连接并在多次调用中尝试复用，或每次都新建连接）。它们也将从环境变量读取数据库凭证。为了简单和鲁棒性，可以考虑每次调用都获取新连接，并在 finally 块中关闭。
 
-### **1\. annotation\_lambda/lambda\_function.py**
+### **1\. annotation\_lambda**
 
-Module ID: COMP5349\_A2-LAMBDA-ANNOTATION  
-Purpose: 由S3对象创建事件触发的AWS Lambda函数。它从S3下载新创建的图像，使用Google Gemini API生成描述性标题，并将此标题和处理状态更新到RDS MySQL数据库中的相应图像记录。
+Module ID: COMP5349_A2-LAMBDA-ANNOTATION  
+Purpose: 当新图片上传到S3的 `uploads/` 目录后，此Lambda被触发。它会调用Google Gemini API获取图片描述，并将结果存回RDS数据库。
 
-#### **lambda\_handler(event, context)**
+#### **lambda_function.py (Annotation Lambda)**
 
-* **Unique ID:** COMP5349\_A2-LAMBDA-ANNOTATION-lambda\_handler  
-* **职责:** Lambda函数的主入口点。协调S3事件解析、图像下载、通过Gemini API生成标题以及数据库更新的过程。  
-* **接口 (事件驱动):**  
-  * **触发器:** AWS S3, s3:ObjectCreated:\* 事件。  
-  * **输入 (event):** 标准S3事件JSON对象。  
-  * **输入 (context):** AWS Lambda上下文对象 (提供运行时信息，如 aws\_request\_id, log\_stream\_name 等)。  
-  * **输出:** 返回一个JSON对象，指示成功、跳过或失败，例如 {'status': 'success', 's3\_key': object\_key, 'caption\_generated': True}。此返回值主要用于日志记录/监控。  
-* **前置条件:**  
-  * Lambda函数具有适当的IAM权限 (S3 GetObject, RDS数据库操作, CloudWatch Logs, Gemini API的网络访问)。  
-  * 设置了所需的环境变量：S3\_IMAGE\_BUCKET, GEMINI\_API\_KEY, GEMINI\_MODEL\_NAME, GEMINI\_PROMPT, DB\_HOST, DB\_USER, DB\_PASSWORD, DB\_NAME, DB\_PORT (可选), LOG\_LEVEL。  
-  * S3事件结构有效，并包含 Records\[0\].s3.bucket.name 和 Records\[0\].s3.object.key。  
-  * 为此Lambda函数配置了死信队列 (SQS)。  
-* **后置条件:**  
-  * **成功处理:** 生成图像标题，RDS中的 images 表使用标题文本更新，并将对应图像的 caption\_status 设置为 'completed'。  
-  * **跳过处理 (例如，缩略图对象):** 不发生S3下载、API调用或数据库更新。Lambda正常退出。  
-  * **处理失败 (S3下载、Gemini API、数据库更新):** 记录错误，尝试将RDS中图像的 caption\_status 更新为 'failed' (如果可能，在 caption 字段中记录错误说明)，Lambda可能抛出异常以向S3触发器发出失败信号 (导致重试并最终进入DLQ)。  
-* **核心业务逻辑步骤:**  
-  1. 初始化日志记录器，从 context 获取 aws\_request\_id。记录执行开始。  
-  2. 从S3事件中提取 bucket\_name 和 object\_key。处理潜在的 KeyError 或 IndexError。  
-  3. **过滤对象键:** 如果 object\_key.startswith('thumbnails/')，记录INFO并返回 {'status': 'skipped', 'reason': 'thumbnail\_object'}。  
-  4. (可选) 增加对文件扩展名的检查，例如只处理 .jpg, .jpeg, .png, .gif 后缀的文件。  
-  5. 初始化 db\_conn \= None。  
-  6. 使用 try...finally 块确保数据库连接关闭。  
-     * try 块内:  
-       a. 记录尝试从S3下载图像。  
-       b. 调用辅助函数 \_download\_image\_from\_s3(bucket\_name, object\_key, context.aws\_request\_id) 返回 image\_bytes (或抛出 S3InteractionError)。  
-       c. 记录尝试调用Gemini API。  
-       d. 调用辅助函数 \_call\_gemini\_api(image\_bytes, context.aws\_request\_id) 返回 caption\_text (字符串或 None) 或抛出 GeminiAPIError / ConfigurationError。  
-       e. 记录尝试连接数据库。  
-       f. db\_conn \= \_get\_db\_connection\_lambda(context.aws\_request\_id) (Lambda特定的数据库连接辅助函数)。  
-       g. 如果 caption\_text有效 (非 None 且非空):  
-       \* 记录尝试使用成功获取的标题更新数据库。  
-       \* 调用辅助函数 \_update\_caption\_in\_db(db\_conn, object\_key, caption\_text, 'completed', context.aws\_request\_id)。  
-       \* 记录成功并返回 {'status': 'success', 's3\_key': object\_key, 'caption\_length': len(caption\_text)}。  
-       h. 否则 (caption\_text为 None 或空，表示字幕生成问题，如安全阻止或无内容):  
-       \* 记录关于无标题的警告/错误。  
-       \* 调用 \_update\_caption\_in\_db(db\_conn, object\_key, "Caption generation failed or content was blocked.", 'failed', context.aws\_request\_id)。  
-       \* 返回 {'status': 'error', 's3\_key': object\_key, 'error\_type': 'NoCaptionGenerated', 'message': 'Caption generation failed or content was blocked.'}。  
-     * **except S3InteractionError as e:** 记录错误。如果 db\_conn 尚未建立，则尝试建立。尝试调用 \_update\_caption\_in\_db 将状态更新为 'failed'。重新抛出异常。  
-     * **except GeminiAPIError as e:** 同上，适配Gemini错误。  
-     * **except ConfigurationError as e:** (例如 GEMINI\_API\_KEY 缺失) 同上，适配配置错误。  
-     * **except DatabaseError as e:** (可能来自 \_get\_db\_connection\_lambda 或 \_update\_caption\_in\_db) 记录严重错误。重新抛出异常。  
-     * **except Exception as e:** (捕获所有意外错误) 记录严重未处理异常。如果 db\_conn 已建立，尝试更新状态为 'failed'。包装为 COMP5349A2Error 重新抛出。  
-     * **finally 块内:** 如果 db\_conn 非 None 且打开，则调用 db\_conn.close()。记录关闭操作。  
-* **错误处理机制:**  
-  * 针对S3、Gemini、数据库交互的特定 try-except 块。  
-  * 在重新引发严重错误之前，尝试将数据库状态更新为 'failed'。  
-  * 依赖AWS Lambda的内置重试机制和后续的DLQ处理。  
-* **日志记录要求 (JSON格式，包含 aws\_request\_id):**  
-  * INFO: Lambda调用开始，S3事件详情 (bucket, key)。  
-  * INFO: 跳过非目标对象 (例如，缩略图)。  
-  * DEBUG 或 INFO: 从S3下载图像 (开始、成功、大小)。  
-  * DEBUG 或 INFO: Gemini API调用 (开始、成功、标题长度/摘要或阻止原因)。  
-  * DEBUG 或 INFO: 数据库连接尝试，数据库更新操作 (开始、成功)。  
-  * WARNING: Gemini未生成标题 (例如，安全过滤器)。  
-  * ERROR: S3下载失败，Gemini API失败，数据库连接/更新失败 (附带错误详情)。  
-  * CRITICAL: 未处理的异常。  
-  * INFO: Lambda调用结束 (状态、持续时间)。  
-* **测试用例 (使用Mocks进行单元测试):**  
-  * test\_handler\_success\_caption\_generated\_and\_db\_updated  
-  * test\_handler\_skips\_thumbnail\_object  
-  * test\_handler\_s3\_download\_failure\_updates\_db\_status\_to\_failed\_and\_raises  
-  * test\_handler\_gemini\_api\_failure\_updates\_db\_status\_to\_failed\_and\_raises  
-  * test\_handler\_gemini\_api\_returns\_no\_caption\_updates\_db\_status\_to\_failed  
-  * test\_handler\_gemini\_api\_key\_missing\_raises\_config\_error\_and\_updates\_db  
-  * test\_handler\_db\_update\_failure\_after\_gemini\_success\_raises\_db\_error  
-  * test\_handler\_db\_connection\_failure\_raises\_db\_error  
-  * test\_handler\_invalid\_s3\_event\_structure\_logs\_error\_and\_returns\_error\_status  
-  * test\_handler\_unexpected\_exception\_updates\_db\_status\_to\_failed\_and\_raises
+*   **Unique ID:** COMP5349_A2-LAMBDA-ANNOTATION-lambda_handler
+*   **触发器 (Trigger):** AWS S3 (ObjectCreated via EventBridge)
+    *   事件源: `aws.s3`
+    *   事件类型: `Object Created`
+    *   S3桶: 主图片桶 (从环境变量 `S3_IMAGE_BUCKET` 或CloudFormation导入的 `${AppStorageStackName}-OriginalImagesBucketName` 获取)
+    *   对象键前缀 (Object Key Prefix): `uploads/`
+*   **核心职责 (Core Responsibilities):**
+    1.  从S3事件中解析出bucket名和object key。
+    2.  **重要：过滤掉由 `thumbnail_lambda` 生成的缩略图对象，避免循环触发。** 缩略图通常存放在如 `thumbnails/` 前缀下。此Lambda只处理原始上传 (`uploads/`) 的图片。
+    3.  从S3下载原始图片字节流。
+    4.  **调用Google Gemini API进行图像描述：**
+        *   **SDK 使用:** 明确使用 `google-generativeai` Python SDK。
+        *   **认证方式:** 使用存储在环境变量 `GEMINI_API_KEY` 中的API密钥。
+        *   **模型:** 使用环境变量 `GEMINI_MODEL_NAME` 指定的模型 (例如 `gemini-1.5-flash-latest` 或 `gemini-1.0-pro-vision`)。
+        *   **Prompt:** 使用环境变量 `GEMINI_PROMPT` 指定的提示文本。
+        *   **输入:** 图片字节流和提示文本。
+        *   **输出:** 生成的文本描述。
+        *   **注意：** **不应**在此处使用 `google-cloud-aiplatform` (Vertex AI) SDK 或服务账户认证方式来调用Gemini进行图像理解，除非项目明确更改为此方案。当前设计是直接通过 `google-generativeai` SDK 和 API Key。
+    5.  连接到RDS MySQL数据库。
+    6.  将获取到的图片描述 (caption)、S3原始图片key、文件名、以及状态 ('completed' 或 'failed') 更新到数据库的 `images` 表中 (这是一个 UPSERT 操作：如果记录已存在则更新，否则插入)。
+*   **环境变量 (Environment Variables):**
+        *   `GEMINI_API_KEY`: Google Gemini API 密钥。
+        *   `GEMINI_MODEL_NAME`: 使用的Gemini模型名称。
+        *   `GEMINI_PROMPT`: 调用Gemini API时使用的提示文本。
+        *   `LOG_LEVEL`: 日志级别。
+        *   `S3_ORIGINAL_IMAGES_BUCKET_NAME`: 原始图片S3桶名 (通过CloudFormation导入)。
+*   **错误处理 (Error Handling):**
+    *   S3下载错误: 抛出 `S3InteractionError`，记录错误，更新DB状态为 'failed' 并记录错误信息。
+    *   Gemini API调用错误 (包括配置错误如API Key缺失、API限流、内容安全阻止等): 抛出 `GeminiAPIError` 或 `ConfigurationError`，记录错误，更新DB状态为 'failed' 并记录错误信息。
+    *   数据库连接/操作错误: 抛出 `DatabaseError`，记录错误。如果Gemini API已成功但DB失败，原始caption应尝试记录。
+    *   输入事件解析错误: 抛出 `InvalidInputError`。
+    *   所有未捕获的异常应被捕获，记录CRITICAL日志，并确保Lambda以失败状态退出，以便触发重试或DLQ。
+*   **日志记录 (Logging):**
+        *   INFO: 开始处理图片 {s3_key}。
+        *   INFO: 成功下载图片 {s3_key}。
+        *   INFO: 调用Gemini API ({GEMINI_MODEL_NAME}) 处理图片 {s3_key}。
+        *   INFO: 成功从Gemini API获取描述，长度 {length}。
+        *   INFO: 成功连接到数据库。
+        *   ERROR: Gemini API 调用失败: {error_message} (包括可能的block reason, safety ratings)。
+        *   ERROR: 数据库操作失败: {error_message}。
+*   **数据库交互 (Database Interaction - `images` table - UPSERT logic):**
+        *   INSERT INTO images (original_s3_key, caption, caption_status, annotation, annotation_status, annotation_model, annotation_error_message, last_annotated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+            ON DUPLICATE KEY UPDATE
+            caption = VALUES(caption),
+            caption_status = VALUES(caption_status),
+            annotation = VALUES(annotation),
+            annotation_status = VALUES(annotation_status),
+            annotation_model = VALUES(annotation_model),
+            annotation_error_message = VALUES(annotation_error_message),
+            last_annotated_at = CURRENT_TIMESTAMP
 
-#### **Helper Function: \_download\_image\_from\_s3(bucket\_name: str, object\_key: str, aws\_request\_id: str) \-\> bytes**
+### **2\. thumbnail\_lambda**
 
-* **Unique ID:** COMP5349\_A2-LAMBDA-ANNOTATION-\_download\_image\_from\_s3  
-* **职责:** 从S3下载图像文件并以字节形式返回其内容。  
-* **逻辑:** 使用 boto3.client('s3').get\_object()。读取 response\['Body'\]。处理异常并包装为 S3InteractionError。记录日志。
-
-#### **Helper Function: \_call\_gemini\_api(image\_bytes: bytes, aws\_request\_id: str) \-\> Optional\[str\]**
-
-* **Unique ID:** COMP5349\_A2-LAMBDA-ANNOTATION-\_call\_gemini\_api  
-* **职责:** 调用Gemini API为给定的图像字节生成标题。  
-* **逻辑:**  
-  1. 从环境变量获取 GEMINI\_API\_KEY, GEMINI\_MODEL\_NAME, GEMINI\_PROMPT。若 GEMINI\_API\_KEY 缺失，抛出 ConfigurationError。  
-  2. 配置 genai.configure(api\_key=...)。  
-  3. 创建模型 genai.GenerativeModel(model\_name)。  
-  4. **确定MIME类型:** 尝试使用 python-magic 库从 image\_bytes 推断MIME类型。如果库不可用或推断失败，或推断出的类型不在接受列表（如 'image/jpeg', 'image/png', 'image/gif'）中，则默认为 'image/jpeg' 或 'image/png'。  
-  5. 构造 image\_part \= {"mime\_type": mime\_type, "data": image\_bytes}。  
-  6. 调用 model.generate\_content(\[prompt\_text, image\_part\])。  
-  7. 检查 response.prompt\_feedback.block\_reason。如果被阻止，记录警告并返回 None。  
-  8. 如果 response.parts 为空或无文本部分，记录警告并返回 None。  
-  9. 提取文本 caption \= response.text。  
-  10. 记录成功或失败/阻止。  
-  11. 返回 caption 或 None。  
-  12. 捕获SDK异常并包装为 GeminiAPIError。
-
-#### **Helper Function: \_get\_db\_connection\_lambda(aws\_request\_id: str)**
-
-* **Unique ID:** COMP5349\_A2-LAMBDA-ANNOTATION-\_get\_db\_connection\_lambda  
-* **职责:** 使用环境变量建立数据库连接。与 COMP5349\_A2-UTIL-DB-get\_db\_connection 类似，但专为Lambda上下文设计（例如，包含 aws\_request\_id 进行日志记录）。  
-* **逻辑:** 读取环境变量，使用 mysql.connector.connect() 连接。在缺少必要环境变量时抛出 ConfigurationError，在连接失败时抛出 DatabaseError。
-
-#### **Helper Function: \_update\_caption\_in\_db(db\_conn, original\_s3\_key: str, caption\_text: Optional\[str\], status: str, aws\_request\_id: str) \-\> bool**
-
-* **Unique ID:** COMP5349\_A2-LAMBDA-ANNOTATION-\_update\_caption\_in\_db  
-* **职责:** 在数据库中更新标题和状态。与 COMP5349\_A2-UTIL-DB-update\_caption\_in\_db 类似，但为Lambda日志记录/上下文进行了调整。  
-* **逻辑:** 校验状态。执行 UPDATE images SET caption \= %s, caption\_status \= %s WHERE original\_s3\_key \= %s。记录成功/失败。如果 rowcount \> 0 返回 True，否则返回 False。SQL执行失败时抛出 DatabaseError。在日志中包含 aws\_request\_id。
-
-### **2\. thumbnail\_lambda/lambda\_function.py**
-
-Module ID: COMP5349\_A2-LAMBDA-THUMBNAIL  
+Module ID: COMP5349_A2-LAMBDA-THUMBNAIL  
 Purpose: 由S3对象创建事件触发的AWS Lambda函数。它从S3下载新创建的图像，生成固定大小的缩略图（例如，128x128像素，JPEG格式），将缩略图上传到同一S3存储桶内的 thumbnails/ 前缀下，并使用缩略图的S3密钥和处理状态更新RDS MySQL数据库中的相应图像记录。
 
-#### **lambda\_handler(event, context)**
+#### **lambda_function.py (Thumbnail Lambda)**
 
-* **Unique ID:** COMP5349\_A2-LAMBDA-THUMBNAIL-lambda\_handler  
-* **职责:** Lambda函数的主入口点。协调S3事件解析、图像下载、使用Pillow生成缩略图、将缩略图上传到S3以及数据库更新。  
-* **接口 (事件驱动):** 与 annotation\_lambda 相同。  
-* **输出:** JSON对象，指示成功、跳过或失败。  
-  // Success  
-  {"status": "success", "original\_s3\_key": "image.jpg", "thumbnail\_s3\_key": "thumbnails/image.jpg"}  
-  // Skipped  
-  {"status": "skipped", "s3\_key": "thumbnails/image.jpg", "reason": "Object is already a thumbnail or non-target"}  
-  // Failure  
-  {"status": "error", "original\_s3\_key": "image.jpg", "error\_type": "ImageProcessingError", "message": "Thumbnail generation failed"}
-
-* **前置条件:**  
-  * IAM权限：S3 GetObject (根对象), S3 PutObject (S3\_IMAGE\_BUCKET/thumbnails/\*), RDS操作, CloudWatch Logs。  
-  * 环境变量：S3\_IMAGE\_BUCKET, DB\_HOST, DB\_USER, DB\_PASSWORD, DB\_NAME, DB\_PORT (可选), LOG\_LEVEL, THUMBNAIL\_SIZE (e.g., "128x128")。  
-  * 已配置DLQ。  
-* **后置条件:**  
-  * **成功处理:** 缩略图生成并存储在S3的 thumbnails/ 目录下。RDS中的 images 表使用 thumbnail\_s3\_key 更新，并将 thumbnail\_status 设置为 'completed'。  
-  * **跳过处理:** 无图像处理或数据库更新。  
-  * **处理失败:** 记录错误。尝试将RDS中的 thumbnail\_status 更新为 'failed'。Lambda可能引发异常。  
-* **核心业务逻辑步骤:**  
-  1. 初始化日志，获取 aws\_request\_id。  
-  2. 从S3事件中提取 bucket\_name 和 original\_object\_key。  
-  3. **过滤对象键:** 如果 original\_object\_key.startswith('thumbnails/')，记录INFO并返回跳过状态。  
-  4. 从环境变量 THUMBNAIL\_SIZE 解析目标尺寸 target\_dims \= (width, height)。如果无效或未设置，则默认为 (128, 128\) 并记录警告。  
-  5. 初始化 db\_conn \= None, status\_to\_set \= 'failed', error\_message\_for\_db \= "Unknown error", final\_thumbnail\_s3\_key \= None。  
-  6. try...finally (用于数据库连接关闭)。  
-     * try 块内:  
-       a. 调用 \_download\_image\_from\_s3(...) 获取 image\_bytes。  
-       b. 调用 \_generate\_thumbnail(image\_bytes, target\_dims, context.aws\_request\_id) 获取 thumbnail\_bytes\_io (io.BytesIO 对象)。  
-       c. 确定缩略图S3 Key:  
-       python import os original\_filename\_part \= os.path.basename(original\_object\_key) basename\_without\_ext, \_ \= os.path.splitext(original\_filename\_part) final\_thumbnail\_s3\_key \= f"thumbnails/{basename\_without\_ext}.jpg" \# 输出为JPEG  
-       d. 调用 \_upload\_thumbnail\_to\_s3(bucket\_name, final\_thumbnail\_s3\_key, thumbnail\_bytes\_io, context.aws\_request\_id)。  
-       e. status\_to\_set \= 'completed'。  
-       f. return\_payload \= {'status': 'success', ...}。  
-     * **except S3InteractionError as e:** 记录错误，设置 error\_message\_for\_db，return\_payload，重新抛出。  
-     * **except ImageProcessingError as e:** 同上。  
-     * **except ConfigurationError as e:** (例如 THUMBNAIL\_SIZE 格式错误) 同上。  
-     * **except Exception as e:** (意外错误) 记录严重错误，设置 error\_message\_for\_db，return\_payload，包装为 COMP5349A2Error 重新抛出。  
-  7. **数据库更新 (在主 try/except 块之后，返回/重新抛出之前):**  
-     * try:  
-       * db\_conn \= \_get\_db\_connection\_lambda(context.aws\_request\_id)。  
-       * 准备 thumbnail\_s3\_key\_for\_db \= final\_thumbnail\_s3\_key if status\_to\_set \== 'completed' else None。  
-       * 调用 \_update\_thumbnail\_info\_in\_db(db\_conn, original\_object\_key, thumbnail\_s3\_key\_for\_db, status\_to\_set, context.aws\_request\_id)。  
-     * except DatabaseError as db\_e: 记录错误。此时处理可能部分成功，但状态无法更新。  
-     * except Exception as db\_e\_unhandled: 记录严重错误。  
-     * finally: 关闭 db\_conn。  
-  8. 如果在S3/图像处理期间捕获到异常，则重新引发该异常。否则，返回 return\_payload。  
-* **错误处理机制:** 与 annotation\_lambda 类似。  
-* **日志记录要求 (JSON格式，包含 aws\_request\_id):**  
-  * INFO: Lambda开始，S3事件详情，跳过信息。  
-  * DEBUG/INFO: 原图下载，缩略图生成 (原始/目标/最终尺寸，格式)，缩略图上传 (key，成功)。  
-  * DEBUG/INFO: 数据库连接/更新。  
-  * ERROR: 任何步骤中的失败。  
-  * CRITICAL: 未处理的异常。  
-  * INFO: Lambda结束 (状态，持续时间)。  
-* **测试用例 (使用Mocks进行单元测试):**  
-  * test\_handler\_success\_thumbnail\_generated\_uploaded\_db\_updated  
-  * test\_handler\_skips\_thumbnail\_path\_object  
-  * test\_handler\_s3\_download\_failure\_updates\_db\_and\_raises  
-  * test\_handler\_image\_processing\_failure\_updates\_db\_and\_raises  
-  * test\_handler\_s3\_thumbnail\_upload\_failure\_updates\_db\_and\_raises  
-  * test\_handler\_db\_update\_failure\_raises\_db\_error\_after\_processing  
-  * test\_handler\_invalid\_thumbnail\_size\_env\_uses\_default\_and\_logs\_warning
-
-#### **Helper Function: \_download\_image\_from\_s3(bucket\_name: str, object\_key: str, aws\_request\_id: str) \-\> bytes**
-
-* **Unique ID:** COMP5349\_A2-LAMBDA-THUMBNAIL-\_download\_image\_from\_s3  
-* **注意:** 此函数与 annotation\_lambda 中的功能相同。如果使用Lambda Layers，则可以共享此实用程序。目前，假定它是独立定义的。
-
-#### **Helper Function: \_generate\_thumbnail(image\_bytes: bytes, target\_dims: tuple, aws\_request\_id: str) \-\> io.BytesIO**
-
-* **Unique ID:** COMP5349\_A2-LAMBDA-THUMBNAIL-\_generate\_thumbnail  
-* **职责:** 从图像字节生成缩略图，并转换为JPEG格式。  
-* **输入:** image\_bytes (bytes), target\_dims (tuple, (width, height))。  
-* **逻辑:**  
-  1. 记录开始，原始图像字节大小。  
-  2. try...except Pillow相关异常:  
-     * img \= Image.open(io.BytesIO(image\_bytes))。  
-     * 记录原始格式 (img.format) 和尺寸 (img.size)。  
-     * **处理透明度 (用于JPEG输出):**  
-       if img.mode in ('RGBA', 'LA') or (img.mode \== 'P' and 'transparency' in img.info):  
-           \# logger.info(f"Original image mode {img.mode} has alpha, converting to RGB with white background.", ...)  
-           background \= Image.new('RGB', img.size, (255, 255, 255))  
-           img\_to\_paste \= img.convert('RGBA') if img.mode \== 'P' and 'transparency' in img.info else img \# Ensure alpha channel for paste  
-           background.paste(img\_to\_paste, (0,0), img\_to\_paste if img\_to\_paste.mode \== 'RGBA' else img\_to\_paste.convert('RGBA'))  
-           img \= background  
-       elif img.mode \!= 'RGB':  
-           \# logger.info(f"Original image mode {img.mode}, converting to RGB.", ...)  
-           img \= img.convert('RGB')
-
-     * img.thumbnail(target\_dims, Image.Resampling.LANCZOS) (原地修改 img)。  
-     * 创建 output\_io \= io.BytesIO()。  
-     * img.save(output\_io, format='JPEG', quality=85) (quality可调，85是不错的起点)。  
-     * output\_io.seek(0)。  
-     * 记录INFO: "Thumbnail generated. New size: {img.size}, Output format: JPEG."。  
-     * 返回 output\_io。  
-  3. except UnidentifiedImageError as uie: 记录错误。抛出 ImageProcessingError(message=f"Cannot identify image file: {uie}", ..., error\_code="INVALID\_IMAGE\_FORMAT")。  
-  4. except Exception as e: (其他Pillow错误) 记录错误。抛出 ImageProcessingError(message=f"Pillow processing error: {e}", ..., error\_code="PILLOW\_PROCESSING\_ERROR")。
-
-#### **Helper Function: \_upload\_thumbnail\_to\_s3(bucket\_name: str, thumbnail\_s3\_key: str, thumbnail\_bytes\_io: io.BytesIO, aws\_request\_id: str)**
-
-* **Unique ID:** COMP5349\_A2-LAMBDA-THUMBNAIL-\_upload\_thumbnail\_to\_s3  
-* **职责:** 将生成的缩略图 (JPEG) 上传到S3。  
-* **逻辑:** 使用 boto3.client('s3').upload\_fileobj()，在 ExtraArgs 中设置 ContentType='image/jpeg'。处理异常并包装为 S3InteractionError。记录日志。
-
-#### **Helper Function: \_get\_db\_connection\_lambda(aws\_request\_id: str)**
-
-* **Unique ID:** COMP5349\_A2-LAMBDA-THUMBNAIL-\_get\_db\_connection\_lambda  
-* **注意:** 与 annotation\_lambda 中的相同。
-
-#### **Helper Function: \_update\_thumbnail\_info\_in\_db(db\_conn, original\_s3\_key: str, thumbnail\_s3\_key: Optional\[str\], status: str, aws\_request\_id: str) \-\> bool**
-
-* **Unique ID:** COMP5349\_A2-LAMBDA-THUMBNAIL-\_update\_thumbnail\_info\_in\_db  
-* **职责:** 在数据库中更新缩略图S3密钥和状态。  
-* **逻辑:** 与 COMP5349\_A2-UTIL-DB-update\_thumbnail\_info\_in\_db / annotation\_lambda.\_update\_caption\_in\_db 类似。
+*   **Unique ID:** COMP5349_A2-LAMBDA-THUMBNAIL-lambda_handler
+*   **触发器 (Trigger):** AWS S3 (ObjectCreated via EventBridge)
+    *   事件源: `aws.s3`
+    *   事件类型: `Object Created`
+    *   S3桶: 主图片桶 (从环境变量 `S3_IMAGE_BUCKET` 或CloudFormation导入的 `${AppStorageStackName}-OriginalImagesBucketName` 获取)
+    *   对象键前缀 (Object Key Prefix): `uploads/`
+*   **核心职责 (Core Responsibilities):**
+    1.  从S3事件中解析出bucket名和object key。
+    2.  **重要：过滤掉由 `annotation_lambda` 生成的描述对象，避免循环触发。** 描述通常存放在如 `uploads/` 前缀下。此Lambda只处理原始上传 (`uploads/`) 的图片。
+    3.  从S3下载原始图片字节流。
+    4.  生成固定大小的缩略图。
+    5.  将缩略图上传到S3的 thumbnails/ 目录下。
+    6.  更新RDS MySQL数据库中的 thumbnail_s3_key 和 thumbnail_status。
+*   **环境变量 (Environment Variables):**
+        *   `S3_IMAGE_BUCKET`: 主图片S3桶名 (通过CloudFormation导入)。
+        *   `THUMBNAIL_SIZE`: 缩略图目标尺寸 (e.g., "128x128")。
+        *   `LOG_LEVEL`: 日志级别。
+        *   `S3_ORIGINAL_IMAGES_BUCKET_NAME`: 原始图片S3桶名 (通过CloudFormation导入)。
+*   **错误处理 (Error Handling):**
+    *   S3下载错误: 抛出 `S3InteractionError`，记录错误，更新DB状态为 'failed' 并记录错误信息。
+    *   缩略图生成错误: 抛出 `ImageProcessingError`，记录错误，更新DB状态为 'failed' 并记录错误信息。
+    *   数据库连接/操作错误: 抛出 `DatabaseError`，记录错误。如果缩略图生成成功但DB失败，原始图片应尝试记录。
+    *   输入事件解析错误: 抛出 `InvalidInputError`。
+    *   所有未捕获的异常应被捕获，记录CRITICAL日志，并确保Lambda以失败状态退出，以便触发重试或DLQ。
+*   **日志记录 (Logging):**
+        *   INFO: 开始处理图片 {s3_key}。
+        *   INFO: 成功下载图片 {s3_key}。
+        *   INFO: 生成缩略图 {s3_key}。
+        *   INFO: 缩略图上传到S3。
+        *   ERROR: 缩略图生成失败: {error_message}。
+        *   ERROR: 数据库操作失败: {error_message}。
+*   **数据库交互 (Database Interaction - `images` table - UPSERT logic):**
+        *   INSERT INTO images (original_s3_key, thumbnail_s3_key, thumbnail_status, last_thumbnail_generated_at)
+            VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+            ON DUPLICATE KEY UPDATE
+            thumbnail_status = VALUES(thumbnail_status),
+            last_thumbnail_generated_at = CURRENT_TIMESTAMP
 
 ## **四、数据库 (database/)**
 
 ### **schema.sql (或 create-database.sh 中的SQL部分) \- 最终确认**
 
-Module ID: COMP5349\_A2-DB\_SCRIPT-SCHEMA  
+Module ID: COMP5349_A2-DB_SCRIPT-SCHEMA  
 Purpose: 定义 images 表的SQL模式，该表用于存储已上传图像的元数据，包括其S3位置、生成的标题、缩略图位置和处理状态。此模式旨在支持Assignment 2的异步处理特性。
 
 #### **表: images**
@@ -924,7 +793,7 @@ Purpose: 定义 images 表的SQL模式，该表用于存储已上传图像的元
 
 ## **五、部署 (deployment/)**
 
-Module ID: COMP5349\_A2-DEPLOYMENT-ARCHITECTURE  
+Module ID: COMP5349_A2-DEPLOYMENT-ARCHITECTURE  
 Purpose: 概述部署整个图像标注系统的关键AWS资源及其配置策略。本节作为创建CloudFormation模板或Terraform脚本的蓝图。目标是实现云计算项目所期望的可扩展、有弹性且经济高效的架构。
 
 ### **关键AWS资源与配置策略**
@@ -1027,3 +896,134 @@ Purpose: 概述部署整个图像标注系统的关键AWS资源及其配置策�
 10. **(可选) AWS Secrets Manager:**  
     * 存储RDS主密码，Gemini API密钥。  
     * EC2和Lambda的IAM角色将有权读取这些密钥。
+
+### **1\. CloudFormation 模板设计原则**
+
+* **模块化:** 将不同类型的资源分离到不同的堆栈中 (e.g., 网络层, 应用层, Lambda层)。  
+* **参数化:** 广泛使用参数 (Parameters) 和映射 (Mappings) 来增加模板的灵活性和可重用性，例如环境名称、实例类型、S3桶名占位符、ECR镜像URI等。  
+* **输出 (Outputs):** 使用输出来暴露关键资源属性 (例如 S3桶名, API Gateway URL, Lambda函数名)，以便其他堆栈或应用可以引用它们。  
+* **命名规范:** 资源逻辑ID和物理名称应清晰且一致，例如使用 `AWS::StackName` 作为前缀。  
+* **最少权限:** IAM角色和策略应遵循最少权限原则。  
+* **可更新性:** 设计模板时应考虑到未来的更新，避免破坏性更改。对于Lambda函数，使用容器镜像部署时，通过更新`ImageUri`参数来部署新版本。  
+* **删除策略:** 为关键资源 (如S3桶，RDS数据库) 设置适当的 DeletionPolicy (例如 Retain)。
+
+### **2\. CloudFormation 模板结构**
+
+项目包含多个CloudFormation模板来实现模块化部署：
+
+* **01-network-stack.yaml (示例性 - 具体内容可能超出当前作业范围或已预配置):**
+  * **职责:** 定义基础网络资源，如VPC, 子网, 路由表, Internet Gateway, NAT Gateway。
+  * **主要资源:** `AWS::EC2::VPC`, `AWS::EC2::Subnet`, `AWS::EC2::RouteTable`, `AWS::EC2::InternetGateway`, `AWS::EC2::NatGateway`, `AWS::EC2::SecurityGroup` (基础网络安全组)。
+
+* **02-application-stack.yaml:**
+  * **职责:** 定义应用层资源，如S3存储桶, RDS数据库实例, EC2 Auto Scaling Group, Application Load Balancer, 以及相关的IAM角色和安全组。
+  * **主要资源:**
+    * `AWS::S3::Bucket`: 用于存储原始图片和缩略图。
+      * **关键配置:** `NotificationConfiguration` 中的 `EventBridgeConfiguration.EventBridgeEnabled: true`，确保S3事件可以发送到EventBridge。
+    * `AWS::RDS::DBInstance`: MySQL数据库。
+    * `AWS::AutoScaling::AutoScalingGroup`, `AWS::AutoScaling::LaunchConfiguration` (或 `AWS::EC2::LaunchTemplate`): Web服务器实例。
+    * `AWS::ElasticLoadBalancingV2::LoadBalancer`, `AWS::ElasticLoadBalancingV2::TargetGroup`, `AWS::ElasticLoadBalancingV2::Listener`: 应用负载均衡器。
+    * IAM角色和安全组 (EC2实例角色, RDS安全组, ALB安全组)。
+    * (可选) `AWS::SecretsManager::Secret`: 用于存储数据库凭证。
+
+* **03-lambda-stack.yaml**  
+  * **职责:** 定义Lambda函数及其相关资源，如IAM角色、EventBridge规则、SQS DLQ和日志组。
+  * **主要资源：**
+    * `AWS::Lambda::Function` (x2 for Annotation and Thumbnail)  
+      * `PackageType: Image`  
+      * `Code.ImageUri`: 通过参数传入，指向ECR中的特定镜像摘要 (e.g., `!Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/my-repo:${ImageTagOrDigest}"`)。  
+      * IAM执行角色。  
+      * 环境变量。  
+      * EventBridge触发器配置。  
+      * VPC配置 (如果需要访问VPC资源)。  
+      * DLQ配置。  
+    * `AWS::IAM::Role` (x2 Lambda执行角色)  
+    * `AWS::IAM::Policy` (或内联策略)  
+    * `AWS::Logs::LogGroup` (x2 为Lambda函数创建日志组)  
+    * `AWS::SQS::Queue` (x1 可能作为通用DLQ，或每个Lambda一个)  
+    * `AWS::Events::Rule` (x1 S3上传事件规则，目标为EventBridge默认总线)  
+    * `AWS::Lambda::Permission` (x2 允许EventBridge调用Lambda函数)
+
+## **六、测试策略 (Testing Strategy)**
+
+本项目的测试策略侧重于确保各个组件的正确性和系统整体的稳定性，主要包括单元测试、集成考虑以及端到端验证。
+
+### **1\. 单元测试 (Unit Testing)**
+
+*   **工具:** `pytest` 将作为主要的测试框架。
+*   **范围:** 
+    *   `web_app/utils/s3_utils.py` 和 `web_app/utils/db_utils.py` 中的所有辅助函数。
+    *   `lambda_functions/annotation_lambda/lambda_function.py` 和 `lambda_functions/thumbnail_lambda/lambda_function.py` 中的 `lambda_handler` 主处理逻辑以及所有内部辅助函数。
+    *   `web_app/app.py` 中的路由处理逻辑（通过模拟请求和依赖）。
+*   **方法:** 
+    *   大量使用 `unittest.mock` (通过 `pytest-mock` 插件) 来模拟外部依赖和行为，包括：
+        *   AWS服务客户端 (如 `boto3.client('s3')`) 及其方法调用。
+        *   数据库连接 (`mysql.connector.connect`) 和游标操作 (`cursor.execute`, `cursor.fetchall`, `cursor.lastrowid`, `db_conn.commit`)。
+        *   Google Gemini API 客户端 (`genai.GenerativeModel`) 及其方法调用。
+        *   环境变量的读取 (`os.environ.get`)。
+        *   文件系统操作 (如果涉及)。
+    *   针对每个函数或方法，测试其在各种输入下的行为，包括有效输入、无效输入和边界条件。
+*   **覆盖重点:** 
+    *   所有定义的业务逻辑分支。
+    *   错误处理路径 (例如，自定义异常的抛出和捕获)。
+    *   成功路径。
+    *   对外部服务模拟调用的参数校验和返回值处理。
+*   **Lambda Handler 测试要点:** 
+    *   验证对不同事件结构 (直接S3事件和EventBridge包装的S3事件) 的正确解析。
+    *   确保在不同条件下正确调用核心业务逻辑辅助函数。
+    *   验证在处理成功、失败或跳过等情况下，是否正确尝试调用数据库更新函数。
+    *   验证日志记录是否按预期执行（可以捕获日志输出进行断言，或mock logger对象）。
+
+### **2\. 集成测试 (Integration Testing)**
+
+*   **范围与考虑:** 
+    *   **Web应用与工具类:** 测试 `web_app/app.py` 中的路由是否能正确调用 `s3_utils.py` 和 `db_utils.py` 中的函数，并正确处理其成功返回或抛出的异常。这部分可以通过带有部分真实依赖（如内存数据库SQLite进行快速测试，或连接到开发数据库）和部分mock（如S3 mock）的方式进行。
+    *   **Lambda与AWS服务:** Lambda函数与实际AWS服务（S3, EventBridge, RDS, IAM）的集成主要通过部署后的端到端测试进行验证。在开发阶段，可以编写针对本地模拟环境（如LocalStack）的集成测试，但这超出了本项目的基本要求。
+*   **方法:** 
+    *   对于Web应用，可以使用Flask的测试客户端 (`app.test_client()`) 发起请求，并观察与模拟的或真实的（开发环境）依赖的交互。
+    *   对于Lambda，真正的集成测试通常涉及将代码部署到AWS环境并触发执行。
+*   **当前项目侧重:** 主要通过单元测试确保各模块内部逻辑的正确性，并通过后续的手动端到端测试验证云上集成。由于项目核心是无服务器后端，纯粹的、自动化的"集成测试"阶段相对较轻。
+
+### **3\. 端到端测试 (End-to-End Testing)**
+
+*   **范围:** 模拟完整的用户使用场景，验证整个系统流程的正确性。
+*   **方法:** 主要通过手动操作和观察进行。
+    1.  **部署所有组件:** 使用CloudFormation部署网络、应用和Lambda堆栈。
+    2.  **Web UI操作:** 
+        *   通过浏览器访问Web应用的上传页面。
+        *   上传新的图像文件 (jpg, png, gif)。
+        *   导航到画廊页面。
+    3.  **验证与观察:** 
+        *   **S3存储桶:** 确认原始图像已上传到正确的S3路径。
+        *   **EventBridge (CloudWatch Logs):** 确认S3事件已发送到EventBridge，并且EventBridge规则已成功触发目标Lambda函数。
+        *   **Lambda函数 (CloudWatch Logs):** 
+            *   检查 `AnnotationLambdaFunction` 和 `ThumbnailLambdaFunction` 的日志，确认它们被成功调用。
+            *   验证事件解析是否正确。
+            *   确认图像下载、Gemini API调用（对于AnnotationLambda）、图像处理（对于ThumbnailLambda）、缩略图上传（对于ThumbnailLambda）是否按预期执行或失败。
+            *   确认数据库更新操作是否被尝试和报告成功/失败。
+        *   **RDS数据库:** 直接查询 `images` 表，验证：
+            *   新上传图像的记录已创建。
+            *   `caption`, `caption_status`, `thumbnail_s3_key`, `thumbnail_status` 字段是否在Lambda处理后按预期更新。
+        *   **S3存储桶 (缩略图):** 确认缩略图已生成并存储在 `thumbnails/` 路径下。
+        *   **Web UI (画廊页面):** 
+            *   新上传的图像是否出现在画廊中。
+            *   图像的标题和缩略图是否正确显示（或显示"处理中"、"失败"状态）。
+            *   预签名URL是否有效，图像能否正确加载。
+        *   **错误场景测试:** 
+            *   上传一个非常小的、可能无法生成有意义标题的图像。
+            *   （如果可能）模拟Gemini API的失败响应或网络问题。
+            *   上传一个非图像文件，观察系统的反应。
+
+### **4\. 测试配置文件和执行**
+
+*   **`pytest.ini`:** 
+    *   **作用:** 用于配置 `pytest` 的行为，以优化测试发现和执行过程。
+    *   **关键配置 (`norecursedirs`):** 
+        ```ini
+        [pytest]
+        norecursedirs = .git .pytest_cache .*_cache logs .*env venv env node_modules target build dist package */package .*\.egg-info
+        ```
+        此配置确保 `pytest` 在收集测试用例时，会忽略指定的目录。特别是 `package` 和 `*/package` 模式，用于跳过我们为Lambda函数打包依赖时可能在 `package/` 目录下产生的第三方库自带的测试文件，从而避免不相关的测试失败或 `ModuleNotFoundError` (例如，如果这些测试依赖于其包的特定安装结构)。
+*   **运行测试:** 
+    *   在项目根目录下执行命令 `pytest`。
+    *   `pytest` 会自动发现并执行所有符合其命名约定 (例如 `test_*.py` 文件或 `*_test.py` 文件中的 `test_*` 函数或 `Test*` 类中的 `test_*` 方法) 的测试用例。

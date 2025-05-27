@@ -84,9 +84,10 @@ class TestSaveInitialImageMeta:
     def test_save_initial_image_meta_success(self, mock_db_conn):
         # Arrange
         original_s3_key = "test/image.jpg"
+        filename = "image.jpg"
 
         # Act
-        result = save_initial_image_meta(mock_db_conn, original_s3_key)
+        result = save_initial_image_meta(mock_db_conn, original_s3_key, filename)
 
         # Assert
         assert result == 1
@@ -96,6 +97,7 @@ class TestSaveInitialImageMeta:
     def test_save_initial_image_meta_duplicate(self, mock_db_conn):
         # Arrange
         original_s3_key = "test/image.jpg"
+        filename = "image.jpg"
         mock_db_conn.cursor().execute.side_effect = mysql.connector.Error(
             errno=errorcode.ER_DUP_ENTRY,
             msg="Duplicate entry"
@@ -103,20 +105,21 @@ class TestSaveInitialImageMeta:
 
         # Act & Assert
         with pytest.raises(DatabaseError) as exc_info:
-            save_initial_image_meta(mock_db_conn, original_s3_key)
+            save_initial_image_meta(mock_db_conn, original_s3_key, filename)
         assert "Duplicate entry" in str(exc_info.value)
         assert exc_info.value.error_code == "DB_UNIQUE_VIOLATION"
 
     def test_save_initial_image_meta_db_error(self, mock_db_conn):
         # Arrange
         original_s3_key = "test/image.jpg"
+        filename = "image.jpg"
         mock_db_conn.cursor().execute.side_effect = mysql.connector.Error(
             msg="General database error"
         )
 
         # Act & Assert
         with pytest.raises(DatabaseError) as exc_info:
-            save_initial_image_meta(mock_db_conn, original_s3_key)
+            save_initial_image_meta(mock_db_conn, original_s3_key, filename)
         assert "Failed to save initial image metadata" in str(exc_info.value)
 
 # --- Test get_all_image_data_for_gallery ---
@@ -133,19 +136,19 @@ class TestGetAllImageDataForGallery:
         expected_data = [
             {
                 'id': 1,
-                'original_s3_key': 'test/image1.jpg',
-                'caption': 'Test caption 1',
-                'thumbnail_s3_key': 'thumbnails/image1.jpg',
-                'caption_status': 'completed',
+                's3_key_original': 'test/image1.jpg',
+                'annotation': 'Test annotation 1',
+                's3_key_thumbnail': 'thumbnails/image1.jpg',
+                'annotation_status': 'completed',
                 'thumbnail_status': 'completed',
                 'uploaded_at': '2024-03-20 10:00:00'
             },
             {
                 'id': 2,
-                'original_s3_key': 'test/image2.jpg',
-                'caption': 'Test caption 2',
-                'thumbnail_s3_key': 'thumbnails/image2.jpg',
-                'caption_status': 'completed',
+                's3_key_original': 'test/image2.jpg',
+                'annotation': 'Test annotation 2',
+                's3_key_thumbnail': 'thumbnails/image2.jpg',
+                'annotation_status': 'completed',
                 'thumbnail_status': 'completed',
                 'uploaded_at': '2024-03-20 09:00:00'
             }
@@ -179,7 +182,7 @@ class TestGetAllImageDataForGallery:
         # Act & Assert
         with pytest.raises(DatabaseError) as exc_info:
             get_all_image_data_for_gallery(mock_db_conn)
-        assert "Failed to retrieve images for gallery" in str(exc_info.value)
+        assert "Failed to retrieve image data for gallery" in str(exc_info.value)
 
 # --- Test update_caption_in_db ---
 class TestUpdateCaptionInDb:
@@ -243,7 +246,7 @@ class TestUpdateCaptionInDb:
         # Act & Assert
         with pytest.raises(DatabaseError) as exc_info:
             update_caption_in_db(mock_db_conn, original_s3_key, caption_text, status)
-        assert "Failed to update caption" in str(exc_info.value)
+        assert "Failed to update annotation" in str(exc_info.value)
 
 # --- Test update_thumbnail_info_in_db ---
 class TestUpdateThumbnailInfoInDb:

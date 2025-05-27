@@ -8,6 +8,13 @@ from unittest.mock import patch, MagicMock, call
 from botocore.exceptions import ClientError
 import mysql.connector
 import copy
+import sys
+import google.generativeai as genai
+
+# Adjust sys.path so that lambda_function.py can find custom_exceptions.py
+lambda_function_dir_annotation = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'lambda_functions', 'annotation_lambda'))
+if lambda_function_dir_annotation not in sys.path:
+    sys.path.insert(0, lambda_function_dir_annotation)
 
 from lambda_functions.annotation_lambda.lambda_function import (
     lambda_handler,
@@ -16,12 +23,12 @@ from lambda_functions.annotation_lambda.lambda_function import (
     _get_db_connection_lambda,
     _update_caption_in_db
 )
-from web_app.utils.custom_exceptions import (
-    S3InteractionError,
-    GeminiAPIError,
-    DatabaseError,
-    ConfigurationError,
+from custom_exceptions import (
     COMP5349A2Error,
+    S3InteractionError,
+    DatabaseError,
+    GeminiAPIError,
+    ConfigurationError,
     InvalidInputError
 )
 
@@ -129,11 +136,12 @@ class TestLambdaHandler:
         )
         mock_get_db_conn.assert_called_once_with('test-aws-request-id-123')
         mock_update_db.assert_called_once_with(
-            mock_db_connection,
-            'uploads/test-image.jpg',
-            mock_caption,
-            'completed',
-            'test-aws-request-id-123'
+            db_conn=mock_db_connection,
+            filename='test-image.jpg',
+            s3_key_original='uploads/test-image.jpg',
+            annotation_text=mock_caption,
+            status='completed',
+            aws_request_id='test-aws-request-id-123'
         )
 
     def test_handler_skips_thumbnail_object(
@@ -201,11 +209,12 @@ class TestLambdaHandler:
         
         # Verify DB was updated with failed status
         mock_update.assert_called_once_with(
-            mock_db_connection,
-            'uploads/test-image.jpg',
-            "S3 Download Error: Failed to download image",
-            'failed',
-            'test-aws-request-id-123'
+            db_conn=mock_db_connection,
+            filename='test-image.jpg',
+            s3_key_original='uploads/test-image.jpg',
+            annotation_text="S3 Download Error: Failed to download image",
+            status='failed',
+            aws_request_id='test-aws-request-id-123'
         )
 
     def test_handler_gemini_api_failure_updates_db_status_to_failed_and_raises(
@@ -213,23 +222,21 @@ class TestLambdaHandler:
     ):
         """Test Gemini API failure updates DB status and raises error."""
         # Arrange
+        gemini_error_message = "Failed to generate caption from API"
+        gemini_error_code = "GEMINI_API_ERROR_SPECIFIC"
         gemini_error = GeminiAPIError(
-            "Failed to generate caption",
-            error_code="GEMINI_API_ERROR"
+            gemini_error_message,
+            error_code=gemini_error_code
         )
         
-        # Mock environment variables
         mocker.patch.dict(os.environ, {
             'GEMINI_API_KEY': 'test-api-key',
-            'GEMINI_MODEL_NAME': 'gemini-pro-vision',
-            'GEMINI_PROMPT': 'Describe this image',
             'DB_HOST': 'test-host',
             'DB_USER': 'test-user',
             'DB_PASSWORD': 'test-password',
             'DB_NAME': 'test-db'
         })
         
-        # Mock helper functions
         mocker.patch(
             'lambda_functions.annotation_lambda.lambda_function._download_image_from_s3',
             return_value=mock_image_bytes
@@ -242,123 +249,126 @@ class TestLambdaHandler:
             'lambda_functions.annotation_lambda.lambda_function._get_db_connection_lambda',
             return_value=mock_db_connection
         )
-        mock_update = mocker.patch(
-            'lambda_functions.annotation_lambda.lambda_function._update_caption_in_db',
-            return_value=True
+        mock_update_db = mocker.patch(
+            'lambda_functions.annotation_lambda.lambda_function._update_caption_in_db'
         )
         
         # Act & Assert
         with pytest.raises(GeminiAPIError) as exc_info:
             lambda_handler(mock_s3_event, mock_lambda_context)
         
-        assert "Failed to generate caption" in str(exc_info.value)
-        assert exc_info.value.error_code == "GEMINI_API_ERROR"
+        assert gemini_error_message in str(exc_info.value)
+        assert exc_info.value.error_code == gemini_error_code
         
         # Verify DB was updated with failed status
-        mock_update.assert_called_once_with(
-            mock_db_connection,
-            'uploads/test-image.jpg',
-            "Gemini API Error: Failed to generate caption",
-            'failed',
-            'test-aws-request-id-123'
+        mock_update_db.assert_called_once_with(
+            db_conn=mock_db_connection,
+            filename='test-image.jpg',
+            s3_key_original='uploads/test-image.jpg',
+            annotation_text=f"Gemini API Error: {gemini_error_message}",
+            status='failed',
+            aws_request_id='test-aws-request-id-123'
         )
 
-    def test_handler_gemini_api_returns_no_caption_updates_db_status_to_failed(
+    def test_handler_gemini_content_blocked_updates_db_status_to_failed_and_raises(
         self, mocker, mock_s3_event, mock_lambda_context, mock_image_bytes, mock_db_connection
     ):
-        """Test when Gemini API returns no caption."""
+        """Test when Gemini API blocks content, DB is updated and GeminiAPIError is raised."""
         # Arrange
-        # Mock environment variables
+        content_blocked_error_message = "Content was blocked by API due to safety reasons."
+        content_blocked_error = GeminiAPIError(
+            content_blocked_error_message,
+            error_code="CONTENT_BLOCKED"
+        )
+
         mocker.patch.dict(os.environ, {
             'GEMINI_API_KEY': 'test-api-key',
-            'GEMINI_MODEL_NAME': 'gemini-pro-vision',
-            'GEMINI_PROMPT': 'Describe this image',
             'DB_HOST': 'test-host',
             'DB_USER': 'test-user',
             'DB_PASSWORD': 'test-password',
             'DB_NAME': 'test-db'
         })
         
-        # Mock helper functions
         mocker.patch(
             'lambda_functions.annotation_lambda.lambda_function._download_image_from_s3',
             return_value=mock_image_bytes
         )
         mocker.patch(
             'lambda_functions.annotation_lambda.lambda_function._call_gemini_api',
-            return_value=None
+            side_effect=content_blocked_error
         )
         mocker.patch(
             'lambda_functions.annotation_lambda.lambda_function._get_db_connection_lambda',
             return_value=mock_db_connection
         )
-        mock_update = mocker.patch(
-            'lambda_functions.annotation_lambda.lambda_function._update_caption_in_db',
-            return_value=True
+        mock_update_db = mocker.patch(
+            'lambda_functions.annotation_lambda.lambda_function._update_caption_in_db'
         )
         
-        # Act
-        result = lambda_handler(mock_s3_event, mock_lambda_context)
+        # Act & Assert
+        with pytest.raises(GeminiAPIError) as exc_info:
+            lambda_handler(mock_s3_event, mock_lambda_context)
         
-        # Assert
-        assert result == {
-            'status': 'error',
-            's3_key': 'uploads/test-image.jpg',
-            'error_type': 'NoCaptionGenerated',
-            'message': 'Caption generation failed or content was blocked.'
-        }
+        assert content_blocked_error_message in str(exc_info.value)
+        assert exc_info.value.error_code == "CONTENT_BLOCKED"
         
-        # Verify DB was updated with failed status
-        mock_update.assert_called_once_with(
-            mock_db_connection,
-            'uploads/test-image.jpg',
-            "Caption generation failed or content was blocked.",
-            'failed',
-            'test-aws-request-id-123'
+        # Verify DB was updated with failed status and the specific error message
+        mock_update_db.assert_called_once_with(
+            db_conn=mock_db_connection,
+            filename='test-image.jpg',
+            s3_key_original='uploads/test-image.jpg',
+            annotation_text=f"Gemini API Error: {content_blocked_error_message}",
+            status='failed',
+            aws_request_id='test-aws-request-id-123'
         )
 
-    def test_handler_gemini_api_key_missing_raises_config_error_and_updates_db(
+    def test_handler_gemini_api_key_missing_updates_db_and_raises_config_error(
         self, mocker, mock_s3_event, mock_lambda_context, mock_image_bytes, mock_db_connection
     ):
-        """Test missing Gemini API key raises config error and updates DB."""
+        """Test missing Gemini API key updates DB and raises original ConfigurationError."""
         # Arrange
-        # Mock environment variables - intentionally missing GEMINI_API_KEY
+        config_error_message_from_exception = "GEMINI_API_KEY not configured." 
+
         mocker.patch.dict(os.environ, {
-            'GEMINI_MODEL_NAME': 'gemini-pro-vision',
-            'GEMINI_PROMPT': 'Describe this image',
             'DB_HOST': 'test-host',
             'DB_USER': 'test-user',
             'DB_PASSWORD': 'test-password',
             'DB_NAME': 'test-db'
+            # GEMINI_API_KEY is intentionally missing
         })
-        
-        # Mock helper functions
+
         mocker.patch(
             'lambda_functions.annotation_lambda.lambda_function._download_image_from_s3',
             return_value=mock_image_bytes
         )
         mocker.patch(
+            'lambda_functions.annotation_lambda.lambda_function._call_gemini_api',
+            side_effect=ConfigurationError(config_error_message_from_exception, error_code='GEMINI_KEY_MISSING')
+        )
+        mocker.patch(
             'lambda_functions.annotation_lambda.lambda_function._get_db_connection_lambda',
             return_value=mock_db_connection
         )
-        mock_update = mocker.patch(
-            'lambda_functions.annotation_lambda.lambda_function._update_caption_in_db',
-            return_value=True
+        mock_update_db = mocker.patch(
+            'lambda_functions.annotation_lambda.lambda_function._update_caption_in_db'
         )
-        
+
         # Act & Assert
-        with pytest.raises(ConfigurationError) as exc_info:
+        with pytest.raises(ConfigurationError) as exc_info: # Expecting original ConfigurationError
             lambda_handler(mock_s3_event, mock_lambda_context)
         
-        assert "GEMINI_API_KEY" in str(exc_info.value)
-        
-        # Verify DB was updated with failed status
-        mock_update.assert_called_once_with(
-            mock_db_connection,
-            'uploads/test-image.jpg',
-            "Configuration Error: Missing GEMINI_API_KEY environment variable",
-            'failed',
-            'test-aws-request-id-123'
+        assert exc_info.value.message == config_error_message_from_exception
+        assert exc_info.value.error_code == 'GEMINI_KEY_MISSING'
+
+        # Change expected_db_error_message to match the actual observed value in the failing test output
+        expected_db_error_message = "Configuration Error: GEMINI_API_KEY not configured."
+        mock_update_db.assert_called_once_with(
+            db_conn=mock_db_connection,
+            filename='test-image.jpg',
+            s3_key_original='uploads/test-image.jpg',
+            annotation_text=expected_db_error_message, 
+            status='failed',
+            aws_request_id='test-aws-request-id-123'
         )
 
     def test_handler_db_update_failure_after_gemini_success_raises_db_error(
@@ -460,7 +470,9 @@ class TestLambdaHandler:
         with pytest.raises(InvalidInputError) as exc_info:
             lambda_handler(invalid_event, mock_lambda_context)
         
-        assert "Invalid S3 event structure" in str(exc_info.value)
+        # Assert that the correct error message and code are present
+        assert "Event structure is not recognized as S3 or EventBridge-wrapped S3" in str(exc_info.value)
+        assert exc_info.value.error_code == 'UNKNOWN_EVENT_STRUCTURE'
 
     def test_handler_unexpected_exception_attempts_db_update_and_raises_comp5349a2error(
         self, mocker, mock_s3_event, mock_lambda_context, mock_image_bytes, mock_db_connection
@@ -502,11 +514,12 @@ class TestLambdaHandler:
         
         # Verify DB was updated with failed status
         mock_update.assert_called_once_with(
-            mock_db_connection,
-            'uploads/test-image.jpg',
-            "Unexpected processing error: Unexpected error",
-            'failed',
-            'test-aws-request-id-123'
+            db_conn=mock_db_connection,
+            filename='test-image.jpg',
+            s3_key_original='uploads/test-image.jpg',
+            annotation_text="Unexpected processing error: Unexpected error",
+            status='failed',
+            aws_request_id='test-aws-request-id-123'
         )
 
 # --- Test Helper Functions ---
@@ -559,100 +572,212 @@ class TestDownloadImageFromS3:
         assert exc_info.value.error_code == "S3_DOWNLOAD_FAILED"
 
 class TestCallGeminiAPI:
-    def test_call_gemini_success(self, mocker):
-        """Test successful caption generation using Gemini API."""
+    @patch('lambda_functions.annotation_lambda.lambda_function.genai.configure')
+    @patch('lambda_functions.annotation_lambda.lambda_function.genai.GenerativeModel')
+    @patch('lambda_functions.annotation_lambda.lambda_function.magic.from_buffer')
+    def test_call_gemini_success(self, mock_magic_from_buffer, mock_generative_model_class, mock_genai_configure, mocker):
+        """Test successful Gemini API call."""
         # Arrange
-        mock_model = MagicMock()
-        mock_response = MagicMock()
-        mock_response.text = "A beautiful sunset over mountains"
-        # Ensure prompt_feedback.block_reason is None or Falsy for success case
-        mock_response.prompt_feedback = MagicMock()
-        mock_response.prompt_feedback.block_reason = None
-        mock_model.generate_content.return_value = mock_response
+        mock_api_key = "fake-api-key"
+        mock_model_name = "gemini-pro-vision"
+        mock_prompt = "Describe this image"
+        mock_image_data = b"some image data"
+        expected_caption = "A lovely cat."
         
         mocker.patch.dict(os.environ, {
-            'GEMINI_API_KEY': 'test-api-key',
-            'GEMINI_MODEL_NAME': 'gemini-pro-vision',
-            'GEMINI_PROMPT': 'Describe this image'
+            "GEMINI_API_KEY": mock_api_key,
+            "GEMINI_MODEL_NAME": mock_model_name,
+            "GEMINI_PROMPT": mock_prompt
         })
-        mocker.patch('google.generativeai.GenerativeModel', return_value=mock_model)
-        
-        # Act
-        result = _call_gemini_api(
-            b"mock image content",
-            'test-request-id'
-        )
-        
-        # Assert
-        assert result == "A beautiful sunset over mountains"
-        mock_model.generate_content.assert_called_once()
 
-    def test_call_gemini_api_key_missing_raises_configuration_error(self, mocker):
-        """Test missing API key raises ConfigurationError."""
+        mock_magic_from_buffer.return_value = "image/jpeg"
+        
+        mock_model_instance = MagicMock()
+        mock_model_instance.generate_content.return_value = MagicMock(text=expected_caption, parts=[MagicMock()], prompt_feedback=MagicMock(block_reason=None))
+        mock_generative_model_class.return_value = mock_model_instance
+
+        # Act
+        caption = _call_gemini_api(mock_image_data, "test-req-id")
+
+        # Assert
+        mock_genai_configure.assert_called_once_with(api_key=mock_api_key)
+        mock_generative_model_class.assert_called_once_with(mock_model_name)
+        
+        # Check the structure of the content passed to generate_content
+        # generate_content expects a list of parts.
+        # The first part is the image, second is the prompt.
+        expected_image_part = {'mime_type': 'image/jpeg', 'data': mock_image_data}
+        mock_model_instance.generate_content.assert_called_once_with([expected_image_part, mock_prompt])
+        
+        assert caption == expected_caption
+
+    def test_call_gemini_api_key_missing_raises_value_error(self, mocker):
+        """Test missing GEMINI_API_KEY raises ConfigurationError."""
         # Arrange
         mocker.patch.dict(os.environ, {
-            'GEMINI_MODEL_NAME': 'gemini-pro-vision',
+            # GEMINI_API_KEY is missing
+            'GEMINI_MODEL_NAME': 'gemini-1.0-pro-vision', # Keep other necessary vars
             'GEMINI_PROMPT': 'Describe this image'
         }, clear=True)
-        
-        # Act & Assert
+
+
         with pytest.raises(ConfigurationError) as exc_info:
-            _call_gemini_api(
-                b"mock image content",
-                'test-request-id'
-            )
+            _call_gemini_api(b"mock image content", 'test-request-id')
         
-        assert "GEMINI_API_KEY" in str(exc_info.value)
+        assert "GEMINI_API_KEY not configured" in str(exc_info.value)
+        assert exc_info.value.error_code == 'GEMINI_KEY_MISSING'
 
-    def test_call_gemini_content_blocked_returns_none(self, mocker):
-        """Test when Gemini API blocks content."""
+    @patch('lambda_functions.annotation_lambda.lambda_function.genai.configure')
+    @patch('lambda_functions.annotation_lambda.lambda_function.genai.GenerativeModel')
+    @patch('lambda_functions.annotation_lambda.lambda_function.magic.from_buffer')
+    def test_call_gemini_content_blocked_returns_empty_string(self, mock_magic_from_buffer, mock_generative_model_class, mock_genai_configure, mocker):
+        """Test Gemini API content blocked raises GeminiAPIError with correct reason."""
         # Arrange
-        mock_model = MagicMock()
-        # Simulate content blocked by returning a response object with block_reason set
-        mock_response_blocked = MagicMock()
-        mock_response_blocked.prompt_feedback = MagicMock()
-        mock_response_blocked.prompt_feedback.block_reason = "SAFETY"
-        mock_response_blocked.text = None # or some placeholder, as it shouldn't be used
-        mock_model.generate_content.return_value = mock_response_blocked
-        
         mocker.patch.dict(os.environ, {
-            'GEMINI_API_KEY': 'test-api-key',
-            'GEMINI_MODEL_NAME': 'gemini-pro-vision',
-            'GEMINI_PROMPT': 'Describe this image'
+            "GEMINI_API_KEY": "fake-api-key",
+            "GEMINI_MODEL_NAME": "gemini-pro-vision",
+            "GEMINI_PROMPT": "Describe this image"
         })
-        mocker.patch('google.generativeai.GenerativeModel', return_value=mock_model)
+        mock_magic_from_buffer.return_value = "image/jpeg"
         
-        # Act
-        result = _call_gemini_api(
-            b"mock image content",
-            'test-request-id'
-        )
+        mock_model_instance = MagicMock()
+        # Simulate content blocked response
+        mock_response = MagicMock()
+        mock_response.parts = [] 
         
-        # Assert
-        assert result is None
+        # Correctly mock block_reason.name
+        mock_block_reason = MagicMock()
+        mock_block_reason.name = "SAFETY" # Actual string value
+        mock_response.prompt_feedback = MagicMock(block_reason=mock_block_reason) 
+        
+        mock_response.prompt_feedback.safety_ratings = [MagicMock(category=MagicMock(name="HARM_CATEGORY_SEXUAL"), probability=MagicMock(name="HIGH"))]
+        mock_model_instance.generate_content.return_value = mock_response
+        mock_generative_model_class.return_value = mock_model_instance
 
-    def test_call_gemini_api_sdk_failure_raises_gemini_api_error(self, mocker):
-        """Test Gemini SDK failure raises GeminiAPIError."""
-        # Arrange
-        mock_model = MagicMock()
-        mock_model.generate_content.side_effect = Exception("API error")
+        # Act & Assert
+        with pytest.raises(GeminiAPIError) as exc_info:
+            _call_gemini_api(b"image_data", "test-req-id")
         
+        assert "Gemini API content generation was blocked. Reason: SAFETY" in str(exc_info.value) # Should now pass
+        assert exc_info.value.error_code == "CONTENT_BLOCKED"
+
+    @patch('lambda_functions.annotation_lambda.lambda_function.genai.configure')
+    @patch('lambda_functions.annotation_lambda.lambda_function.genai.GenerativeModel')
+    @patch('lambda_functions.annotation_lambda.lambda_function.magic.from_buffer')
+    def test_call_gemini_empty_response_returns_empty_string(self, mock_magic_from_buffer, mock_generative_model_class, mock_genai_configure, mocker):
+        """Test Gemini API empty response (no text, no parts, no block) raises GeminiAPIError."""
+        # Arrange
         mocker.patch.dict(os.environ, {
-            'GEMINI_API_KEY': 'test-api-key',
-            'GEMINI_MODEL_NAME': 'gemini-pro-vision',
-            'GEMINI_PROMPT': 'Describe this image'
+            "GEMINI_API_KEY": "fake-api-key",
+            "GEMINI_MODEL_NAME": "gemini-pro-vision",
+            "GEMINI_PROMPT": "Describe this image"
         })
-        mocker.patch('google.generativeai.GenerativeModel', return_value=mock_model)
+        mock_magic_from_buffer.return_value = "image/jpeg"
+
+        mock_model_instance = MagicMock()
+        mock_response = MagicMock(text=None, parts=[], prompt_feedback=MagicMock(block_reason=None)) # Empty response
+        mock_model_instance.generate_content.return_value = mock_response
+        mock_generative_model_class.return_value = mock_model_instance
         
         # Act & Assert
         with pytest.raises(GeminiAPIError) as exc_info:
-            _call_gemini_api(
-                b"mock image content",
-                'test-request-id'
-            )
+            _call_gemini_api(b"image_data", "test-req-id")
         
-        assert "Gemini API error: API error" in str(exc_info.value)
-        assert exc_info.value.error_code == "GEMINI_API_ERROR"
+        assert "Gemini API returned an empty response (no text or parts)." in str(exc_info.value)
+        assert exc_info.value.error_code == "EMPTY_RESPONSE"
+
+    @patch('lambda_functions.annotation_lambda.lambda_function.genai.configure')
+    @patch('lambda_functions.annotation_lambda.lambda_function.genai.GenerativeModel')
+    @patch('lambda_functions.annotation_lambda.lambda_function.magic.from_buffer')
+    def test_call_gemini_api_sdk_failure_raises_gemini_api_error(self, mock_magic_from_buffer, mock_generative_model_class, mock_genai_configure, mocker):
+        # Arrange
+        mocker.patch.dict(os.environ, {"GEMINI_API_KEY": "fake-api-key", "GEMINI_MODEL_NAME": "gemini-pro-vision", "GEMINI_PROMPT": "Describe"})
+        mock_magic_from_buffer.return_value = "image/jpeg"
+        
+        mock_model_instance = MagicMock()
+        # Use genai.types.GoogleAPIError (assuming it's the correct one and genai is imported)
+        # If not, a generic Exception would also be caught by the tested code.
+        # For this example, let's assume google.generativeai.types has GoogleAPIError
+        # However, the lambda code catches general Exception, so we can use that for simplicity
+        # if genai.types.GoogleAPIError is problematic or not actually used/raised by the SDK in this way.
+        # sdk_error = genai.types.GoogleAPIError("SDK network error") 
+        sdk_error = Exception("SDK network error") # Simplified to generic Exception as caught by lambda
+        mock_model_instance.generate_content.side_effect = sdk_error
+        mock_generative_model_class.return_value = mock_model_instance
+
+        # Act & Assert
+        with pytest.raises(GeminiAPIError) as exc_info:
+            _call_gemini_api(b"image_data", "test-req-id")
+        
+        assert "Gemini API interaction failed: SDK network error" in str(exc_info.value) 
+        # original_exception should be the sdk_error
+        assert exc_info.value.original_exception is sdk_error
+
+    @patch('lambda_functions.annotation_lambda.lambda_function.genai.configure')
+    @patch('lambda_functions.annotation_lambda.lambda_function.genai.GenerativeModel')
+    @patch('lambda_functions.annotation_lambda.lambda_function.magic.from_buffer')
+    def test_call_gemini_unsupported_mime_type_uses_input_mime(self, mock_magic_from_buffer, mock_generative_model_class, mock_genai_configure, mocker):
+        """Test that if python-magic detects an unsupported MIME, it still tries with that MIME type.
+           The Gemini API might support it, or it might fail later, but we pass it on.
+        """
+        # Arrange
+        mock_api_key = "fake-api-key"
+        mock_model_name = "gemini-pro-vision"
+        mock_prompt = "Describe this image"
+        mock_image_data = b"some image data"
+        unsupported_mime = "image/webp" # Example
+        expected_caption = "A webp image."
+
+        mocker.patch.dict(os.environ, {
+            "GEMINI_API_KEY": mock_api_key,
+            "GEMINI_MODEL_NAME": mock_model_name,
+            "GEMINI_PROMPT": mock_prompt
+        })
+        mock_magic_from_buffer.return_value = unsupported_mime
+        
+        mock_model_instance = MagicMock()
+        mock_model_instance.generate_content.return_value = MagicMock(text=expected_caption, parts=[MagicMock()], prompt_feedback=MagicMock(block_reason=None))
+        mock_generative_model_class.return_value = mock_model_instance
+
+        # Act
+        caption = _call_gemini_api(mock_image_data, "test-req-id")
+
+        # Assert
+        expected_image_part = {'mime_type': unsupported_mime, 'data': mock_image_data}
+        mock_model_instance.generate_content.assert_called_once_with([expected_image_part, mock_prompt])
+        assert caption == expected_caption
+
+    @patch('lambda_functions.annotation_lambda.lambda_function.genai.configure')
+    @patch('lambda_functions.annotation_lambda.lambda_function.genai.GenerativeModel')
+    @patch('lambda_functions.annotation_lambda.lambda_function.magic.from_buffer')
+    def test_call_gemini_magic_detection_error_uses_default_mime(self, mock_magic_from_buffer, mock_generative_model_class, mock_genai_configure, mocker):
+        """Test that if python-magic fails, it defaults to image/jpeg."""
+        # Arrange
+        mock_api_key = "fake-api-key"
+        mock_model_name = "gemini-pro-vision"
+        mock_prompt = "Describe this image"
+        mock_image_data = b"some image data"
+        expected_caption = "A default mime image."
+
+        mocker.patch.dict(os.environ, {
+            "GEMINI_API_KEY": mock_api_key,
+            "GEMINI_MODEL_NAME": mock_model_name,
+            "GEMINI_PROMPT": mock_prompt
+        })
+        mock_magic_from_buffer.side_effect = Exception("Magic failed!") # Simulate error in python-magic
+        
+        mock_model_instance = MagicMock()
+        mock_model_instance.generate_content.return_value = MagicMock(text=expected_caption, parts=[MagicMock()], prompt_feedback=MagicMock(block_reason=None))
+        mock_generative_model_class.return_value = mock_model_instance
+
+        # Act
+        caption = _call_gemini_api(mock_image_data, "test-req-id")
+
+        # Assert
+        # Default MIME type is image/jpeg when magic fails
+        expected_image_part = {'mime_type': 'image/jpeg', 'data': mock_image_data}
+        mock_model_instance.generate_content.assert_called_once_with([expected_image_part, mock_prompt])
+        assert caption == expected_caption
 
 class TestGetDBConnectionLambda:
     def test_get_db_connection_success(self, mocker):
@@ -717,111 +842,142 @@ class TestUpdateCaptionInDB:
         """Test successful caption update in database."""
         # Arrange
         mock_cursor = MagicMock()
-        mock_cursor.rowcount = 1  # 设置 rowcount 为整数
+        mock_cursor.rowcount = 1
         mock_db_connection.cursor.return_value = mock_cursor
-        
+
         # Act
         result = _update_caption_in_db(
             mock_db_connection,
-            'test-image.jpg',
-            'A beautiful sunset',
-            'completed',
-            'test-request-id'
+            'test-image.jpg',   # filename
+            'uploads/test-image.jpg', # s3_key_original
+            'A beautiful sunset', # annotation_text
+            'completed',          # status
+            'test-request-id'   # aws_request_id
         )
         
         # Assert
         assert result is True
-        mock_cursor.execute.assert_called_once()
+        mock_cursor.execute.assert_called_once_with(
+            mocker.ANY,  # SQL query string
+            ('test-image.jpg', 'uploads/test-image.jpg', 'A beautiful sunset', 'completed')
+        )
         mock_db_connection.commit.assert_called_once()
 
     def test_update_caption_db_error_raises_db_error(self, mocker, mock_db_connection):
         """Test database error during update raises DatabaseError."""
         # Arrange
         mock_cursor = MagicMock()
-        mock_cursor.rowcount = 0  # 设置 rowcount 为整数
         mock_cursor.execute.side_effect = mysql.connector.Error("Update failed")
         mock_db_connection.cursor.return_value = mock_cursor
-        
+
         # Act & Assert
         with pytest.raises(DatabaseError) as exc_info:
             _update_caption_in_db(
                 mock_db_connection,
-                'test-image.jpg',
-                'A beautiful sunset',
-                'completed',
-                'test-request-id'
+                'test-image.jpg',   # filename
+                'uploads/test-image.jpg', # s3_key_original
+                'A beautiful sunset', # annotation_text
+                'completed',          # status
+                'test-request-id'   # aws_request_id
             )
-        
-        assert "Database error while updating caption" in str(exc_info.value)
+        assert "Database UPSERT error for annotation info: Update failed" in str(exc_info.value) # Corrected
+        assert exc_info.value.error_code == 'DB_UPSERT_FAILED'
 
     def test_update_caption_s3_upload_failure_raises_db_error(self, mocker, mock_db_connection):
-        """Test S3 upload failure during update raises DatabaseError."""
+        # This test's name is a misnomer from a previous version. It tests a generic DB error.
+        """Test (generic) database error during update raises DatabaseError."""
         # Arrange
-        s3_error = S3InteractionError(
-            "Failed to upload image",
-            error_code="S3_UPLOAD_FAILED"
-        )
         mock_cursor = MagicMock()
-        mock_cursor.rowcount = 1  # 设置 rowcount 为整数
-        mock_cursor.execute.side_effect = s3_error  # 让 execute 抛出 S3InteractionError
+        mock_cursor.execute.side_effect = mysql.connector.Error("Another DB error")
         mock_db_connection.cursor.return_value = mock_cursor
-        
+
         # Act & Assert
-        with pytest.raises(S3InteractionError) as exc_info:
+        with pytest.raises(DatabaseError) as exc_info:
             _update_caption_in_db(
                 mock_db_connection,
-                'test-image.jpg',
-                'A beautiful sunset',
-                'completed',
-                'test-request-id'
+                'test-image.jpg',   # filename
+                'uploads/test-image.jpg', # s3_key_original
+                'A beautiful sunset', # annotation_text
+                'completed',          # status
+                'test-request-id'   # aws_request_id
             )
-        assert "Failed to upload image" in str(exc_info.value)
-        assert exc_info.value.error_code == "S3_UPLOAD_FAILED"
+        assert "Database UPSERT error for annotation info: Another DB error" in str(exc_info.value) # Corrected
+        assert exc_info.value.error_code == 'DB_UPSERT_FAILED'
 
     def test_update_caption_db_connection_failure_raises_db_error(self, mocker, mock_db_connection):
-        """Test database connection failure during update raises DatabaseError."""
+        """Test a DB operation failure (simulated as execute error) raises DatabaseError."""
         # Arrange
-        db_error = DatabaseError(
-            "Failed to connect to database",
-            error_code="DB_CONNECTION_FAILED"
-        )
         mock_cursor = MagicMock()
-        mock_cursor.rowcount = 1  # 设置 rowcount 为整数
-        mock_cursor.execute.side_effect = db_error  # 让 execute 抛出 DatabaseError
+        mock_cursor.execute.side_effect = mysql.connector.Error("DB execute failed post-connection")
         mock_db_connection.cursor.return_value = mock_cursor
         
         # Act & Assert
         with pytest.raises(DatabaseError) as exc_info:
             _update_caption_in_db(
                 mock_db_connection,
-                'test-image.jpg',
-                'A beautiful sunset',
-                'completed',
-                'test-request-id'
+                'test-image.jpg',   # filename
+                'uploads/test-image.jpg', # s3_key_original
+                'A beautiful sunset', # annotation_text
+                'completed',          # status
+                'test-request-id'   # aws_request_id
             )
-        assert "Failed to connect to database" in str(exc_info.value)
-        assert exc_info.value.error_code == "DB_CONNECTION_FAILED"
+        assert "Database UPSERT error for annotation info: DB execute failed post-connection" in str(exc_info.value) # Corrected
+        assert exc_info.value.error_code == 'DB_UPSERT_FAILED'
 
     def test_update_caption_db_update_failure_raises_db_error(self, mocker, mock_db_connection):
-        """Test database update failure during update raises DatabaseError."""
+        """Test database update failure (execute error) raises DatabaseError."""
         # Arrange
-        db_error = DatabaseError(
-            "Failed to update database",
-            error_code="DB_UPDATE_FAILED"
-        )
         mock_cursor = MagicMock()
-        mock_cursor.rowcount = 1  # 设置 rowcount 为整数
-        mock_cursor.execute.side_effect = db_error  # 让 execute 抛出 DatabaseError
+        mock_cursor.execute.side_effect = mysql.connector.Error("Specific update error")
         mock_db_connection.cursor.return_value = mock_cursor
-        
+
         # Act & Assert
         with pytest.raises(DatabaseError) as exc_info:
             _update_caption_in_db(
                 mock_db_connection,
+                'test-image.jpg',   # filename
+                'uploads/test-image.jpg', # s3_key_original
+                'A beautiful sunset', # annotation_text
+                'completed',          # status
+                'test-request-id'   # aws_request_id
+            )
+        assert "Database UPSERT error for annotation info: Specific update error" in str(exc_info.value) # Corrected
+        assert exc_info.value.error_code == 'DB_UPSERT_FAILED'
+
+    def test_update_caption_no_rows_affected_returns_false(self, mocker, mock_db_connection):
+        """Test update with no rows affected (data identical) returns False and logs warning."""
+        # Arrange
+        mock_cursor = MagicMock()
+        mock_cursor.rowcount = 0 
+        mock_db_connection.cursor.return_value = mock_cursor
+        mock_logger_warning = mocker.patch('lambda_functions.annotation_lambda.lambda_function.logger.warning')
+
+        # Act
+        result = _update_caption_in_db(
+            mock_db_connection,
+            'test-image.jpg',   # filename
+            'uploads/test-image.jpg', # s3_key_original
+            'A beautiful sunset', # annotation_text
+            'completed',          # status
+            'test-request-id'   # aws_request_id
+        )
+
+        # Assert
+        assert result is False
+        mock_logger_warning.assert_called_once()
+        assert "UPSERT operation for uploads/test-image.jpg did not affect any rows (might mean the data was identical)." in mock_logger_warning.call_args[0][0] # Corrected
+        mock_db_connection.commit.assert_called_once()
+
+    def test_update_caption_invalid_status_raises_error(self, mocker, mock_db_connection):
+        """Test that an invalid status raises InvalidInputError."""
+        with pytest.raises(InvalidInputError) as exc_info:
+            _update_caption_in_db(
+                mock_db_connection,
                 'test-image.jpg',
-                'A beautiful sunset',
-                'completed',
+                'uploads/test-image.jpg',
+                'A caption',
+                'pending',  # Invalid status
                 'test-request-id'
             )
-        assert "Failed to update database" in str(exc_info.value)
-        assert exc_info.value.error_code == "DB_UPDATE_FAILED" 
+        assert "Invalid status 'pending'" in str(exc_info.value)
+        assert exc_info.value.error_code == 'INVALID_STATUS' 

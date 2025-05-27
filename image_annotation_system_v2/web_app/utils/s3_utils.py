@@ -4,7 +4,11 @@ import io
 import boto3
 from botocore.exceptions import NoCredentialsError, ClientError
 from typing import Optional, Union
-from .custom_exceptions import COMP5349A2Error, S3InteractionError, InvalidInputError, ConfigurationError
+# Smart import handling
+try:
+    from .custom_exceptions import COMP5349A2Error, S3InteractionError, InvalidInputError, ConfigurationError
+except ImportError:
+    from utils.custom_exceptions import COMP5349A2Error, S3InteractionError, InvalidInputError, ConfigurationError
 
 def upload_file_to_s3(
     file_stream: Union[io.BytesIO, 'werkzeug.datastructures.FileStorage'],

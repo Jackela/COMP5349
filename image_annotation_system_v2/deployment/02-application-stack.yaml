@@ -1,0 +1,212 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  CloudFormation template for Image Annotation Application Stack - Part 1:
+  Storage (S3) and Database (RDS MySQL).
+  Utilizes pre-configured LabRole for IAM.
+  This stack depends on the network stack created by 01-vpc-network.yaml.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: "comp5349a2"
+    Description: An environment name prefixed to resource names and used for tagging.
+
+  NetworkStackName:
+    Type: String
+    Default: "ImageAnnotation-Network"
+    Description: Name of the network stack that exports the VPC and networking resources.
+
+  # S3 Bucket Name Parameters (allowing for some customization if needed)
+  OriginalImagesBucketNameSuffix:
+    Type: String
+    Default: "-original-images"
+    Description: Suffix for the original images S3 bucket name. Will be combined with EnvName and AccountID.
+
+  ThumbnailsBucketNameSuffix:
+    Type: String
+    Default: "-thumbnails"
+    Description: Suffix for the thumbnails S3 bucket name. Will be combined with EnvName and AccountID.
+
+  # RDS Database Parameters
+  DBInstanceClass:
+    Type: String
+    Default: "db.t3.micro"
+    Description: RDS instance class. Using micro for cost optimization.
+  
+  DBAllocatedStorage:
+    Type: String
+    Default: "20"
+    Description: Allocated storage for the RDS instance (in GiB).
+
+  DBName:
+    Type: String
+    Default: "ImageAnnotationDB"
+    Description: Name of the database to be created in RDS.
+  
+  DBMasterUsername:
+    Type: String
+    Default: "dbadmin"
+    Description: Master username for the RDS database.
+    NoEcho: false
+  
+  DBMasterUserPassword:
+    Type: String
+    Description: Master password for the RDS database.
+    NoEcho: true
+    MinLength: 8
+    AllowedPattern: "[a-zA-Z0-9]+"
+
+Resources:
+  # S3 Buckets
+  OriginalImagesBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${EnvironmentName}${OriginalImagesBucketNameSuffix}-${AWS::AccountId}-${AWS::Region}"
+      AccessControl: Private
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      NotificationConfiguration:
+        EventBridgeConfiguration:
+          EventBridgeEnabled: true
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - "*"
+            AllowedMethods:
+              - GET
+              - PUT
+              - POST
+              - HEAD
+            AllowedOrigins:
+              - "*"
+            MaxAge: 3000
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName} Original Images Bucket"
+
+  ThumbnailsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${EnvironmentName}${ThumbnailsBucketNameSuffix}-${AWS::AccountId}-${AWS::Region}"
+      AccessControl: Private
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName} Thumbnails Bucket"
+
+  LambdaCodeBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${EnvironmentName}-lambda-code-artifacts-${AWS::AccountId}-${AWS::Region}" # Ensure global uniqueness and lowercase
+      AccessControl: Private
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled # Versioning is good for code packages
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName} Lambda Code Artifacts Bucket"
+
+  # RDS Database Subnet Group
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: "Subnet group for RDS instance"
+      SubnetIds:
+        - !ImportValue
+          Fn::Sub: "${NetworkStackName}-PrivateSubnet1ID"
+        - !ImportValue
+          Fn::Sub: "${NetworkStackName}-PrivateSubnet2ID"
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName} RDS Subnet Group"
+
+  # RDS Database Instance
+  RDSInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBName: !Ref DBName
+      Engine: mysql
+      EngineVersion: "8.0.35"
+      MultiAZ: false
+      DBInstanceClass: !Ref DBInstanceClass
+      AllocatedStorage: !Ref DBAllocatedStorage
+      MasterUsername: !Ref DBMasterUsername
+      MasterUserPassword: !Ref DBMasterUserPassword
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups:
+        - Fn::ImportValue:
+            Fn::Sub: "${NetworkStackName}-DBSecurityGroupID"
+      PubliclyAccessible: false
+      StorageEncrypted: true
+      BackupRetentionPeriod: 7
+      PreferredBackupWindow: "02:00-03:00"
+      PreferredMaintenanceWindow: "sun:03:00-sun:04:00"
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName} RDS Instance"
+    DeletionPolicy: Snapshot
+
+Outputs:
+  OriginalImagesBucketName:
+    Description: Name of the S3 bucket for original images
+    Value: !Ref OriginalImagesBucket
+    Export:
+      Name: !Sub "${AWS::StackName}-OriginalImagesBucketName"
+
+  OriginalImagesBucketArn:
+    Description: ARN of the S3 bucket for original images
+    Value: !GetAtt OriginalImagesBucket.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-OriginalImagesBucketArn"
+      
+  ThumbnailsBucketName:
+    Description: Name of the S3 bucket for thumbnails
+    Value: !Ref ThumbnailsBucket
+    Export:
+      Name: !Sub "${AWS::StackName}-ThumbnailsBucketName"
+
+  LambdaCodeBucketName:
+    Description: Name of the S3 bucket for Lambda deployment packages
+    Value: !Ref LambdaCodeBucket
+    Export:
+      Name: !Sub "${AWS::StackName}-LambdaCodeBucketName"
+
+  RDSEndpointAddress:
+    Description: Endpoint address of the RDS database instance
+    Value: !GetAtt RDSInstance.Endpoint.Address
+    Export:
+      Name: !Sub "${AWS::StackName}-RDSEndpointAddress"
+
+  RDSEndpointPort:
+    Description: Endpoint port of the RDS database instance
+    Value: !GetAtt RDSInstance.Endpoint.Port
+    Export:
+      Name: !Sub "${AWS::StackName}-RDSEndpointPort"
+  
+  RDSDatabaseName:
+    Description: Database name in the RDS instance
+    Value: !Ref DBName
+    Export:
+      Name: !Sub "${AWS::StackName}-RDSDatabaseName"
+
+  # Output LabRole information for reference in subsequent stacks
+  LabRoleName:
+    Description: Name of the pre-configured LabRole to be used by Lambda functions and EC2 instances
+    Value: "LabRole" # This is a fixed name as per Learner Lab environment
+    Export:
+      Name: !Sub "${AWS::StackName}-LabRoleName" 

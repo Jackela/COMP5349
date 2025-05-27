@@ -46,25 +46,50 @@ The system features a web interface for image upload and gallery viewing, backed
 
 The system is built on a three-tier architecture:
 
-1. **Web Application Tier**
-   - Flask application deployed on EC2 instances
-   - Managed by Auto Scaling Group for scalability
-   - Load balanced using Application Load Balancer
-   - Handles user interactions and image uploads
+1. **Web Application Tier (AWS EC2 with Flask & Docker)**
+   - Flask web application (`web_app/app.py`) handles user interactions, image uploads, and gallery display. It is packaged as a Docker container image.
+   - Key Endpoints:
+     - `/`: Serves the main image upload page.
+     - `/upload`: Handles file uploads, stores original images to a dedicated S3 bucket, and records initial metadata in RDS.
+     - `/gallery`: Displays processed images with thumbnails and annotations.
+     - `/api/image_status/<image_id>`: Provides status updates for individual image processing tasks.
+     - `/health`: Standard health check endpoint, used by the ALB.
+   - Deployed on EC2 instances within an Auto Scaling Group. The EC2 instances run the Flask application as a Docker container (specified by `WebAppImageUri` in `04-ec2-alb-asg-stack.yaml`).
+   - An Application Load Balancer distributes traffic to the EC2 instances.
+   - Gunicorn likely runs inside the Docker container to serve the Flask application.
+   - Interacts with AWS S3 for image storage and AWS RDS for metadata using `boto3` and `mysql-connector-python` respectively.
+   - Relies on an IAM Instance Profile (derived from the provided `LabRoleArn`) for AWS service access.
 
 2. **Storage Tier**
    - S3 buckets for storing original images and thumbnails
    - RDS MySQL database for metadata management
    - Secure access through IAM roles and security groups
 
-3. **Processing Tier**
-   - Serverless Lambda functions for image processing
-   - Annotation Lambda for generating image captions
-   - Thumbnail Lambda for creating optimized image versions
-   - Triggered by S3 object creation events
+3. **Processing Tier (AWS Lambda & EventBridge)**
+   - Serverless AWS Lambda functions for backend image processing. These functions are triggered by S3 object creation events in the `S3_IMAGE_BUCKET`, with events routed through AWS EventBridge to the respective Lambdas.
+   - Both Lambda functions (`annotation_lambda`, `thumbnail_lambda`) are packaged as self-contained Docker container images (using `public.ecr.aws/lambda/python:3.9-x86_64` as a base) and deployed via AWS ECR. Each Docker image includes all necessary dependencies and shared code, such as `custom_exceptions.py`, which is copied directly into both Lambda packages during their Docker build process.
+   - **`annotation_lambda` (Image Captioning)**:
+     - *Core Logic*: Downloads the uploaded image from S3, sends it to the Google Gemini API for captioning, and then updates the image metadata in RDS with the generated caption and status (`completed` or `failed`).
+     - *Key Libraries*: `boto3`, `google-generativeai`, `mysql-connector-python`, `python-magic` (all included in its Docker image).
+     - *Environment Variables Used*: 
+       - `DB_HOST`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`, `DB_PORT` (for RDS connection)
+       - `GEMINI_API_KEY` (for authenticating with Google Gemini API)
+       - `GEMINI_MODEL_NAME` (optional, e.g., `gemini-1.5-flash-latest`)
+       - `GEMINI_PROMPT` (optional, e.g., "Describe this image in detail.")
+       - `S3_IMAGE_BUCKET` (implicitly, to know where to get the image from the event)
+       - `LOG_LEVEL` (optional, for logging verbosity)
+   - **`thumbnail_lambda` (Thumbnail Generation)**:
+     - *Core Logic*: Downloads the uploaded image from S3, generates a thumbnail using the Pillow library, uploads the thumbnail to a separate `S3_THUMBNAIL_BUCKET`, and then updates the image metadata in RDS with the thumbnail S3 key and status (`completed` or `failed`).
+     - *Key Libraries*: `boto3`, `Pillow`, `mysql-connector-python` (all included in its Docker image).
+     - *Environment Variables Used*:
+       - `DB_HOST`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`, `DB_PORT` (for RDS connection)
+       - `S3_IMAGE_BUCKET` (implicitly, to know where to get the image from the event)
+       - `S3_THUMBNAIL_BUCKET` (destination for generated thumbnails)
+       - `THUMBNAIL_WIDTH`, `THUMBNAIL_HEIGHT` (optional, for thumbnail dimensions, e.g., 128x128)
+       - `LOG_LEVEL` (optional, for logging verbosity)
 
 4. **External Services**
-   - Google Gemini API for AI-powered image captioning
+   - Google Gemini API for AI-powered image captioning. Note: This is accessed directly using the `google-generativeai` Python SDK and an API Key, not through Vertex AI for this specific image understanding task.
    - Integration through secure API key management
 
 ## Tech Stack
@@ -86,7 +111,7 @@ The system is built on a three-tier architecture:
 
 - **Image Processing**
   - Pillow for image manipulation
-  - Google Gemini API for AI captioning
+  - Google Gemini API for AI captioning (using `google-generativeai` SDK and API Key)
   - python-magic for MIME type detection
 
 - **Development & Testing**
@@ -98,65 +123,115 @@ The system is built on a three-tier architecture:
 
 ```
 image_annotation_system_v2/
-├── web_app/               # Flask web application
-│   ├── static/           # Static assets
-│   ├── templates/        # HTML templates
-│   ├── utils/           # Utility modules
-│   └── app.py           # Main application file
-├── lambda_functions/     # AWS Lambda functions
-│   ├── annotation_lambda/  # Image captioning Lambda
-│   └── thumbnail_lambda/   # Thumbnail generation Lambda
-├── database/            # Database scripts
-│   └── schema.sql       # Database schema
-├── deployment/          # Infrastructure as Code
-├── tests/              # Test suite
-│   ├── web_app/        # Web app tests
-│   └── lambda_functions/ # Lambda function tests
-├── .env.example        # Example environment variables
-└── README.md           # This file
+├── .gitignore             # Specifies intentionally untracked files that Git should ignore
+├── README.md              # This file
+├── conftest.py            # Pytest configuration file, for fixtures shared across tests
+├── database/              # Database scripts and schema
+│   └── schema.sql         # Database schema for RDS MySQL (defines the `images` table)
+├── deployment/            # Infrastructure as Code (AWS CloudFormation templates)
+│   ├── README.md          # Notes on deployment scripts
+│   ├── 00-ecr-repositories.yaml # Defines ECR repositories for Lambda and Web App Docker images.
+│   ├── 01-vpc-network.yaml # Defines VPC, subnets, NAT Gateway, Internet Gateway, route tables, security groups.
+│   ├── 02-application-stack.yaml # Defines core application resources (e.g., S3 buckets, RDS instance, IAM roles, ECR repos, EventBridge rules).
+│   ├── 03-lambda-stack.yaml  # Defines Lambda functions, their configurations and ECR image URIs.
+│   ├── 04-ec2-alb-asg-stack.yaml # Defines EC2 Launch Template, Auto Scaling Group, Application Load Balancer.
+├── env.example            # Example environment variables file (NOTE: actual filename is env.example)
+├── lambda_functions/      # AWS Lambda functions
+│   ├── __init__.py        # Makes lambda_functions a Python package
+│   ├── annotation_lambda/ # Image captioning Lambda
+│   │   ├── Dockerfile       # Dockerfile for the Lambda function
+│   │   ├── lambda_function.py
+│   │   ├── requirements.txt # Dependencies for this Lambda
+│   │   └── custom_exceptions.py # Local module for custom exceptions, copied into the Docker image
+│   └── thumbnail_lambda/  # Thumbnail generation Lambda
+│       ├── Dockerfile
+│       ├── lambda_function.py
+│       ├── requirements.txt
+│       └── custom_exceptions.py # Also uses this local module, copied into the Docker image
+├── package_lambda.py      # LEGACY SCRIPT: Originally for creating .zip deployment packages. Current deployment uses Docker images.
+├── requirements-dev.txt   # Python dependencies for development (e.g., linters, test tools)
+├── setup.py               # Python package setup script (if the project is installable)
+├── tests/                 # Test suite
+│   ├── web_app/           # Web app tests
+│   └── lambda_functions/  # Lambda function tests
+│       ├── annotation_lambda/
+│       └── thumbnail_lambda/
+└── web_app/               # Flask web application
+    ├── static/            # Static assets (CSS, JavaScript, images)
+    ├── templates/         # HTML templates (Jinja2)
+    ├── utils/             # Utility modules for the web application
+    ├── app.py             # Main Flask application file
+    └── requirements.txt   # Python dependencies for the web application
 ```
 
 ## Local Development Setup
 
 ### Prerequisites
 
-- Python 3.9
+- Python 3.9 (as used in Lambda base images and for web_app consistency)
 - pip (Python package installer)
-- Virtual environment tool (venv recommended)
-- AWS account (for S3, RDS, Lambda)
-- Google Gemini API Key
-- MySQL client (optional, for local DB setup)
+- Virtual environment tool (e.g., `venv`)
+- Docker Desktop (or Docker Engine) for building Lambda container images locally.
+- AWS CLI, configured with appropriate credentials and default region.
+- MySQL client (optional, for direct database interaction).
+- An AWS account with access to relevant services (S3, RDS, Lambda, ECR, EventBridge, CloudFormation).
+- A Google Cloud Project with the Gemini API enabled and an API Key.
 
 ### Setup Steps
 
 1. **Clone and Setup Environment**
    ```bash
-   git clone <repository_url>
+   git clone <repository_url> # Replace <repository_url> with the actual URL
    cd image_annotation_system_v2
    python3 -m venv venv
    source venv/bin/activate  # Linux/macOS
    # or
-   venv\Scripts\activate     # Windows
+   # venv\Scripts\activate     # Windows (use this if you are on Windows PowerShell/cmd)
    ```
 
 2. **Install Dependencies**
    ```bash
-   # Web application
+   # Core application dependencies (Web app and Lambdas)
    pip install -r web_app/requirements.txt
-   
-   # Lambda functions
    pip install -r lambda_functions/annotation_lambda/requirements.txt
    pip install -r lambda_functions/thumbnail_lambda/requirements.txt
    
-   # Development dependencies
-   pip install pytest pytest-mock pytest-cov
+   # Development and testing dependencies
+   pip install -r requirements-dev.txt
    ```
 
 3. **Environment Configuration**
+   Create a `.env` file by copying `env.example` (note: your project has `env.example` not `.env.example` based on file listing):
    ```bash
-   cp .env.example .env
-   # Edit .env with your configuration
+   cp env.example .env 
    ```
+   Then, edit the `.env` file with your specific configurations. This file is primarily for local Flask development.
+
+   **Key Environment Variables (for local web_app via `.env` and for deployed Lambdas via CloudFormation/AWS Console):**
+
+   *   **Flask Web Application (`web_app/app.py`):**
+       *   `FLASK_SECRET_KEY`: Secret key for Flask session management.
+       *   `S3_IMAGE_BUCKET`: S3 bucket for original images.
+       *   `S3_THUMBNAIL_BUCKET`: S3 bucket for thumbnails.
+       *   `DB_HOST`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`, `DB_PORT`: RDS MySQL details.
+       *   `LOG_LEVEL`: (Optional) e.g., `INFO`, `DEBUG`.
+
+   *   **`annotation_lambda`:**
+       *   `DB_HOST`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`, `DB_PORT`: RDS MySQL details.
+       *   `GEMINI_API_KEY`: Google Gemini API Key.
+       *   `GEMINI_MODEL_NAME`: (Optional) e.g., `gemini-1.5-flash-latest`.
+       *   `GEMINI_PROMPT`: (Optional) e.g., "Describe this image in detail.".
+       *   `S3_IMAGE_BUCKET`: (Usually passed in event, but good to be aware if needed directly).
+       *   `LOG_LEVEL`: (Optional).
+
+   *   **`thumbnail_lambda`:**
+       *   `DB_HOST`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`, `DB_PORT`: RDS MySQL details.
+       *   `S3_THUMBNAIL_BUCKET`: Destination S3 bucket for thumbnails.
+       *   `S3_IMAGE_BUCKET`: (Usually passed in event).
+       *   `THUMBNAIL_WIDTH`, `THUMBNAIL_HEIGHT`: (Optional) e.g., 128.
+       *   `LOG_LEVEL`: (Optional).
+
+   *Note: For deployed Lambdas, these are set in their AWS environment, often managed by CloudFormation.* 
 
 4. **Database Setup**
    ```bash
@@ -189,27 +264,47 @@ From the project root directory:
 pytest
 
 # Run with coverage report
-pytest --cov=web_app --cov=lambda_functions
+pytest --cov=web_app --cov=lambda_functions # Ensure paths are correct for your project
 ```
 
 ## Deployment Overview
 
-The system is designed for deployment on AWS infrastructure:
+The system is deployed on AWS using a set of AWS CloudFormation templates located in the `deployment/` directory. These templates provision and manage all necessary cloud resources in a specific order. It is crucial to deploy these stacks sequentially as later stacks may depend on resources created by earlier ones.
 
-1. **Infrastructure Setup**
-   - VPC configuration with public and private subnets
-   - Security groups and IAM roles
-   - RDS MySQL instance
-   - S3 buckets for image storage
-   - Application Load Balancer and Auto Scaling Group
+**Prerequisites for Deployment:**
+*   **IAM Role (`LabRole`)**: A pre-existing IAM role (identified by `LabRoleArn` parameter in `03-lambda-stack.yaml` and `04-ec2-alb-asg-stack.yaml`) must exist with necessary permissions for Lambda (S3, RDS, CloudWatch, EventBridge invocation) and EC2 (S3, CloudWatch, ECR pull, potentially RDS).
 
-2. **Application Deployment**
-   - Web application deployment to EC2 instances
-   - Lambda function deployment
-   - S3 event notification configuration
-   - Database migration and initialization
+1.  **Infrastructure Stacks (CloudFormation):**
+    *   **`00-ecr-repositories.yaml`**: Creates the ECR repositories.
+        *   **Key Resources**: `WebAppECRRepository`, `AnnotationLambdaECRRepository`, `ThumbnailLambdaECRRepository`.
+        *   **Must be deployed first.**
+    *   **`01-vpc-network.yaml`**: Sets up the foundational networking infrastructure (VPC, subnets, etc.).
+    *   **`02-application-stack.yaml`**: Provisions core application-level resources (S3, RDS). 
+        *   *Note: This stack does not create the primary IAM execution roles for Lambda/EC2; these are assumed to be prerequisites and passed as `LabRoleArn`.*
+    *   **`03-lambda-stack.yaml`**: Deploys the Lambda functions and their triggers. 
+        *   Relies on ECR repositories created by `00-ecr-repositories.yaml`.
+        *   Requires the full ECR image URIs (including tag/digest) as parameters.
+    *   **`04-ec2-alb-asg-stack.yaml`**: Sets up the web application hosting environment.
+        *   Relies on ECR repository created by `00-ecr-repositories.yaml` for the web app image.
+        *   Requires the full web app ECR image URI (including tag/digest) as a parameter.
 
-Detailed deployment instructions will be provided in the `deployment/` directory.
+2.  **Image Building and Pushing (User Responsibility):**
+    *   **Web Application Docker Image**: Build the Docker image for the Flask web application (`web_app/Dockerfile` - *assuming one exists or is implied by `WebAppImageUri`*) and push it to its ECR repository.
+    *   **Lambda Docker Images**: For each Lambda function (`annotation_lambda`, `thumbnail_lambda`):
+        *   Build the Docker image from its respective directory.
+        *   Push the image to its ECR repository.
+        *   Retrieve the platform-specific (`linux/amd64`) image digest.
+
+3.  **CloudFormation Deployment (User Responsibility):**
+    *   Deploy stacks in numerical order: `00-ecr-repositories.yaml` -> `01-vpc-network.yaml` -> `02-application-stack.yaml` -> `03-lambda-stack.yaml` (providing Lambda image URIs with digests) -> `04-ec2-alb-asg-stack.yaml` (providing Web App image URI).
+    *   Provide all required parameters for each stack (e.g., `LabRoleArn`, `GeminiApiKey`, database credentials, ECR image URIs).
+
+4.  **Post-Deployment Steps (User Responsibility):**
+    *   **Database Schema Application**: After the RDS instance is provisioned by `02-application-stack.yaml`, the schema in `database/schema.sql` must be applied manually or via script.
+
+*(The section previously titled "Lambda Function Deployment (Docker/ECR Workflow - CRITICAL)" has been integrated into the above points for clarity and flow. The critical nature of obtaining the correct image digest remains.)*
+
+Detailed deployment scripts, specific commands, and further instructions for each step should ideally be maintained in the `deployment/` directory or a dedicated operations guide, referencing the `COMP5349/COMP5349 Assignment 2 - 项目设计文档.md` for architectural details.
 
 ## Future Enhancements
 

@@ -3,15 +3,20 @@ import os
 import io
 import json
 import logging
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional
 
 import boto3
 from botocore.exceptions import ClientError
-import google.generativeai as genai
+import google.generativeai as genai # <--- 使用 google.generativeai
+# from google.generativeai.types import HarmCategory, HarmBlockThreshold # 如果需要处理安全设置
+# from google.generativeai import types as genai_types # 根据SDK版本，Part的位置可能不同
+
 import mysql.connector
 from mysql.connector import errorcode
+import magic
 
-from web_app.utils.custom_exceptions import (
+# --- Custom Exceptions --- (No longer web_app.utils)
+from custom_exceptions import (
     COMP5349A2Error,
     S3InteractionError,
     DatabaseError,
@@ -24,6 +29,9 @@ from web_app.utils.custom_exceptions import (
 logger = logging.getLogger()
 log_level_str = os.environ.get('LOG_LEVEL', 'INFO').upper()
 logger.setLevel(getattr(logging, log_level_str, logging.INFO))
+
+# Environment variables for Lambda configuration (consider defaults or raise errors if not set)
+DB_HOST_LAMBDA = os.environ.get('DB_HOST_LAMBDA') # This seems unused, can be removed if not needed
 
 def _get_db_connection_lambda(aws_request_id: str) -> mysql.connector.MySQLConnection:
     """
@@ -80,59 +88,47 @@ def _get_db_connection_lambda(aws_request_id: str) -> mysql.connector.MySQLConne
         logger.error(error_msg, extra={'request_id': aws_request_id})
         raise DatabaseError(error_msg, error_code='DB_CONNECTION_FAILED', original_exception=e)
 
-def _update_caption_in_db(db_conn, original_s3_key: str, caption_text: Optional[str], 
+def _update_caption_in_db(db_conn, filename: str, s3_key_original: str, annotation_text: Optional[str], 
                          status: str, aws_request_id: str) -> bool:
     """
-    Updates the caption and status for an image in the database.
-    
-    Args:
-        db_conn: Database connection object.
-        original_s3_key: The S3 key of the original image.
-        caption_text: The generated caption text or error message.
-        status: The status to set ('completed' or 'failed').
-        aws_request_id: The AWS request ID for logging correlation.
-        
-    Returns:
-        bool: True if the update was successful and affected at least one row.
-        
-    Raises:
-        InvalidInputError: If status is not 'completed' or 'failed'.
-        DatabaseError: If database operation fails.
+    Inserts a new record or updates an existing one with annotation info.
+    This is an UPSERT operation.
     """
-    # Validate status
     if status not in ['completed', 'failed']:
-        error_msg = f"Invalid status '{status}'. Must be 'completed' or 'failed'."
-        logger.error(error_msg, extra={'request_id': aws_request_id})
-        raise InvalidInputError(error_msg, error_code='INVALID_STATUS')
+        raise InvalidInputError(f"Invalid status '{status}'.", error_code='INVALID_STATUS')
 
+    cursor = None
     try:
         cursor = db_conn.cursor()
         
-        # Update the caption and status
         sql = """
-            UPDATE images 
-            SET caption = %s, caption_status = %s 
-            WHERE original_s3_key = %s
+            INSERT INTO images (filename, s3_key_original, annotation, annotation_status)
+            VALUES (%s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+                annotation = VALUES(annotation),
+                annotation_status = VALUES(annotation_status)
         """
-        cursor.execute(sql, (caption_text, status, original_s3_key))
+        cursor.execute(sql, (filename, s3_key_original, annotation_text, status))
         db_conn.commit()
         
         affected_rows = cursor.rowcount
-        cursor.close()
         
         if affected_rows > 0:
-            logger.info(f"Successfully updated caption status to '{status}' for {original_s3_key}",
+            logger.info(f"Successfully upserted annotation info for {s3_key_original} with status '{status}'",
                        extra={'request_id': aws_request_id})
             return True
         else:
-            logger.warning(f"No record found for {original_s3_key}",
+            logger.warning(f"UPSERT operation for {s3_key_original} did not affect any rows (might mean the data was identical).",
                           extra={'request_id': aws_request_id})
             return False
             
     except mysql.connector.Error as e:
-        error_msg = f"Database error while updating caption: {str(e)}"
+        error_msg = f"Database UPSERT error for annotation info: {str(e)}"
         logger.error(error_msg, extra={'request_id': aws_request_id})
-        raise DatabaseError(error_msg, error_code='DB_UPDATE_FAILED', original_exception=e)
+        raise DatabaseError(error_msg, error_code='DB_UPSERT_FAILED', original_exception=e)
+    finally:
+        if cursor:
+            cursor.close()
 
 def _download_image_from_s3(bucket_name: str, object_key: str, aws_request_id: str) -> bytes:
     """
@@ -166,72 +162,95 @@ def _download_image_from_s3(bucket_name: str, object_key: str, aws_request_id: s
         logger.error(error_msg, extra={'request_id': aws_request_id})
         raise S3InteractionError(error_msg, error_code='S3_DOWNLOAD_FAILED', original_exception=e)
 
-def _call_gemini_api(image_bytes: bytes, aws_request_id: str) -> Optional[str]:
-    """
-    Calls the Gemini API to generate a caption for an image.
-    
-    Args:
-        image_bytes: The image data as bytes.
-        aws_request_id: The AWS request ID for logging correlation.
-        
-    Returns:
-        Optional[str]: The generated caption, or None if generation failed.
-        
-    Raises:
-        ConfigurationError: If required configuration is missing.
-        GeminiAPIError: If API call fails.
-    """
-    # Get Gemini configuration from environment variables
-    api_key = os.environ.get('GEMINI_API_KEY')
-    model_name = os.environ.get('GEMINI_MODEL_NAME', 'gemini-pro-vision')
-    prompt = os.environ.get('GEMINI_PROMPT', 'Describe this image in detail.')
+def _call_gemini_api(image_bytes: bytes, aws_request_id: str = "N/A") -> str:
+    """Calls the Gemini API using the google-generativeai SDK."""
+    api_key = os.environ.get("GEMINI_API_KEY")
+    # Ensure you use a model that supports vision, e.g., 'gemini-1.5-flash-latest' or specific vision model.
+    model_name = os.environ.get('GEMINI_MODEL_NAME', 'gemini-1.5-flash-latest') 
+    prompt_text = os.environ.get('GEMINI_PROMPT', 'Describe this image in detail.')
+
+    if not image_bytes:
+        # Add a log for this specific case for easier debugging
+        logger.error("Image data for Gemini API call is empty.", extra={'request_id': aws_request_id})
+        raise ValueError("Image data cannot be empty")
 
     if not api_key:
-        error_msg = "Missing GEMINI_API_KEY environment variable"
-        logger.error(error_msg, extra={'request_id': aws_request_id})
-        raise ConfigurationError(error_msg, error_code='GEMINI_API_KEY_MISSING')
+        logger.error("GEMINI_API_KEY not configured.", extra={'request_id': aws_request_id})
+        raise ConfigurationError("GEMINI_API_KEY not configured.", error_code='GEMINI_KEY_MISSING')
 
     try:
-        # Configure Gemini
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel(model_name)
+        # For vision models, you typically create the model instance like this:
+        model = genai.GenerativeModel(model_name) 
         
-        # TODO: Implement proper MIME type detection using python-magic
-        # For now, default to JPEG
-        mime_type = 'image/jpeg'
+        mime_type = 'image/jpeg' # Default
+        try:
+            # It's good practice to ensure image_bytes is not empty before calling magic
+            if image_bytes:
+                mime_type = magic.from_buffer(image_bytes, mime=True)
+                logger.info(f"Detected MIME type: {mime_type}", extra={'request_id': aws_request_id})
+            else: # Should have been caught by the check above, but as a safeguard
+                logger.warning("Image bytes are empty before MIME type detection, defaulting to image/jpeg", extra={'request_id': aws_request_id})
+
+        except Exception as e: # Catch generic exception from magic
+            logger.warning(f"Could not detect MIME type using python-magic: {e}. Defaulting to image/jpeg.", 
+                           extra={'request_id': aws_request_id})
+            # Fallback to image/jpeg if magic fails for any reason
+            mime_type = 'image/jpeg'
+
+
+        logger.info(f"Calling Gemini API ({model_name})", extra={'request_id': aws_request_id})
         
-        # Prepare image part
-        image_part = {
-            "mime_type": mime_type,
-            "data": image_bytes
-        }
+        # Constructing the content for the API call
+        # The google-generativeai SDK can often infer the type from bytes for common image formats,
+        # but explicitly providing the Part with mime_type is more robust.
+        # Based on the documentation for `google-generativeai` (not Vertex AI SDK),
+        # you provide content as a list, where image parts can be dicts.
+        image_part = {'mime_type': mime_type, 'data': image_bytes}
         
-        logger.info("Calling Gemini API for image captioning",
-                   extra={'request_id': aws_request_id})
+        # Sending the request
+        # The prompt should be a separate part of the list for clarity
+        response = model.generate_content([image_part, prompt_text])
+
+        # Robustly check for blocked content or empty response
+        if not response.parts and response.prompt_feedback and response.prompt_feedback.block_reason:
+            block_reason_name = response.prompt_feedback.block_reason.name
+            error_msg = f"Gemini API content generation was blocked. Reason: {block_reason_name}"
+            logger.error(error_msg, extra={'request_id': aws_request_id})
+            # Check if there are safety ratings to provide more details
+            if response.prompt_feedback.safety_ratings:
+                 for rating in response.prompt_feedback.safety_ratings:
+                     logger.error(f"Safety Rating: Category: {rating.category.name}, Probability: {rating.probability.name}", 
+                                  extra={'request_id': aws_request_id})
+            raise GeminiAPIError(error_msg, error_code='CONTENT_BLOCKED')
         
-        # Generate content
-        response = model.generate_content([prompt, image_part])
-        
-        # Check for blocked content
-        if response.prompt_feedback.block_reason:
-            logger.warning(f"Content blocked by Gemini: {response.prompt_feedback.block_reason}",
-                          extra={'request_id': aws_request_id})
-            return None
-            
-        # Check for empty response
-        if not response.parts or not response.text:
-            logger.warning("Empty response from Gemini API",
-                          extra={'request_id': aws_request_id})
-            return None
-            
-        caption = response.text.strip()
-        logger.info(f"Successfully generated caption ({len(caption)} characters)",
-                   extra={'request_id': aws_request_id})
+        if not response.text and not response.parts: # If text is empty and parts are also empty (no structured content)
+            # This could happen if the model genuinely has nothing to say or another subtle block
+            error_msg = "Gemini API returned an empty response (no text or parts)."
+            logger.error(error_msg, extra={'request_id': aws_request_id})
+            raise GeminiAPIError(error_msg, error_code='EMPTY_RESPONSE')
+
+        caption = response.text # .text should exist if not blocked and parts are present.
+        logger.info(f"Successfully received caption from Gemini API: '{caption[:100]}...'", 
+                    extra={'request_id': aws_request_id})
         return caption
-        
+
+    except ConfigurationError: # Re-raise config errors
+        raise
+    except GeminiAPIError: # Re-raise our specific Gemini errors
+        raise
+    # Specific exceptions from the genai library can be caught here if needed, e.g.
+    # except genai.types.BlockedPromptException as e: # Check exact exception name from SDK docs
+    #     error_msg = f"Gemini API request was blocked: {str(e)}"
+    #     logger.error(error_msg, exc_info=True, extra={'request_id': aws_request_id})
+    #     raise GeminiAPIError(error_msg, error_code='CONTENT_BLOCKED_SDK_EXCEPTION', original_exception=e)
     except Exception as e:
-        error_msg = f"Gemini API error: {str(e)}"
-        logger.error(error_msg, extra={'request_id': aws_request_id})
+        error_msg = f"Gemini API interaction failed: {str(e)}"
+        logger.error(error_msg, exc_info=True, extra={'request_id': aws_request_id})
+        # Check if it's an AttributeError that mentions 'Part', which was our previous issue
+        if isinstance(e, AttributeError) and "'Part'" in str(e):
+             logger.error("This looks like the old AttributeError related to 'Part'. Ensure correct SDK and usage.",
+                          extra={'request_id': aws_request_id})
         raise GeminiAPIError(error_msg, error_code='GEMINI_API_ERROR', original_exception=e)
 
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
@@ -253,16 +272,53 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     
     # Extract S3 event details
     try:
-        bucket_name = event['Records'][0]['s3']['bucket']['name']
-        object_key = event['Records'][0]['s3']['object']['key']
-    except (KeyError, IndexError) as e:
-        error_msg = f"Invalid S3 event structure: {str(e)}"
-        logger.error(error_msg, extra={'request_id': aws_request_id})
-        raise InvalidInputError(error_msg, error_code='INVALID_S3_EVENT')
-    
+        bucket_name = None
+        object_key = None
+
+        if 'detail' in event and isinstance(event.get('detail'), dict) and \
+           'bucket' in event['detail'] and isinstance(event['detail'].get('bucket'), dict) and \
+           'name' in event['detail']['bucket'] and \
+           'object' in event['detail'] and isinstance(event['detail'].get('object'), dict) and \
+           'key' in event['detail']['object']:
+            # EventBridge wrapped S3 event
+            logger.info("Parsing event as EventBridge-wrapped S3 event.", extra={'request_id': aws_request_id})
+            s3_event_detail = event['detail']
+            bucket_name = s3_event_detail['bucket']['name']
+            object_key = s3_event_detail['object']['key']
+        elif 'Records' in event and isinstance(event.get('Records'), list) and \
+             len(event['Records']) > 0 and isinstance(event['Records'][0], dict) and \
+             's3' in event['Records'][0] and isinstance(event['Records'][0].get('s3'), dict) and \
+             'bucket' in event['Records'][0]['s3'] and isinstance(event['Records'][0]['s3'].get('bucket'), dict) and \
+             'name' in event['Records'][0]['s3']['bucket'] and \
+             'object' in event['Records'][0]['s3'] and isinstance(event['Records'][0]['s3'].get('object'), dict) and \
+             'key' in event['Records'][0]['s3']['object']:
+            # Direct S3 event (likely for testing or other direct triggers)
+            logger.info("Parsing event as direct S3 event.", extra={'request_id': aws_request_id})
+            bucket_name = event['Records'][0]['s3']['bucket']['name']
+            object_key = event['Records'][0]['s3']['object']['key']
+        else:
+            error_msg = "Event structure is not recognized as S3 or EventBridge-wrapped S3."
+            event_snippet = {k: v for k, v in event.items() if k != 'detail'} 
+            if 'detail' in event and isinstance(event.get('detail'), dict):
+                event_snippet['detail_keys'] = list(event['detail'].keys())
+            logger.error(error_msg, extra={'request_id': aws_request_id, 'event_snippet': json.dumps(event_snippet, default=str)[:500]})
+            raise InvalidInputError(error_msg, error_code='UNKNOWN_EVENT_STRUCTURE')
+
+    except (KeyError, IndexError) as e: 
+        error_msg = f"Invalid S3 event structure during parsing attempt: {str(e)}"
+        logger.error(error_msg, extra={'request_id': aws_request_id, 'event_snippet': json.dumps(event, default=str)[:500]})
+        raise InvalidInputError(error_msg, error_code='INVALID_S3_EVENT_PARSING')
+    except InvalidInputError: 
+        raise
+    except Exception as e: 
+        error_msg = f"Unexpected error during event parsing: {str(e)}"
+        logger.error(error_msg, exc_info=True, extra={'request_id': aws_request_id})
+        raise ConfigurationError(error_msg, error_code='EVENT_PARSING_UNEXPECTED_ERROR', original_exception=e)
+
     # Skip thumbnail objects
-    if object_key.startswith('thumbnails/'):
-        logger.info(f"Skipping thumbnail object: {object_key}",
+    thumbnail_key_prefix = os.environ.get('THUMBNAIL_KEY_PREFIX', 'thumbnails/')
+    if object_key.startswith(thumbnail_key_prefix): # Ensure consistent prefix checking
+        logger.info(f"Skipping object '{object_key}' as it appears to be a thumbnail (starts with '{thumbnail_key_prefix}').", 
                    extra={'request_id': aws_request_id})
         return {
             'status': 'skipped',
@@ -272,138 +328,187 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     
     # Initialize variables for processing
     db_conn = None
-    status_to_set = 'failed'
-    error_message_for_db = "Unknown processing error"
-    caption_to_store = None
-    return_payload = None
+    status_to_set = 'failed' # Default to failed
+    # error_message_for_db = "Unknown processing error" # Not used, caption_to_store is used
+    caption_to_store = "Processing did not complete successfully." # Default caption for DB on failure
+    return_payload = {} # Initialize to an empty dict
     exception_caught_during_processing = None
+    original_filename = os.path.basename(object_key) # Get filename for DB
     
     # Main processing try-except block
     try:
-        # Download image from S3
+        logger.info(f"Processing original image s3://{bucket_name}/{object_key}", 
+                   extra={'request_id': aws_request_id})
+                   
         image_bytes = _download_image_from_s3(bucket_name, object_key, aws_request_id)
         
-        # Generate caption using Gemini
         caption_text_result = _call_gemini_api(image_bytes, aws_request_id)
         
-        if caption_text_result:
-            status_to_set = 'completed'
-            caption_to_store = caption_text_result
-            return_payload = {
-                'status': 'success',
-                's3_key': object_key,
-                'caption_length': len(caption_text_result)
-            }
-        else:
-            status_to_set = 'failed'
-            caption_to_store = "Caption generation failed or content was blocked."
-            return_payload = {
-                'status': 'error',
-                's3_key': object_key,
-                'error_type': 'NoCaptionGenerated',
-                'message': caption_to_store
-            }
+        # If caption_text_result is not empty, it's a success.
+        # _call_gemini_api now raises GeminiAPIError for blocked/empty responses.
+        status_to_set = 'completed'
+        caption_to_store = caption_text_result 
+        return_payload = {
+            'status': 'success',
+            's3_key': object_key,
+            'caption_length': len(caption_text_result) if caption_text_result else 0
+        }
             
     except S3InteractionError as e:
-        logger.error(f"S3 error: {e.message}", extra={'request_id': aws_request_id})
+        logger.error(f"S3 error for '{object_key}': {e.message} (Code: {e.error_code})", 
+                     extra={'request_id': aws_request_id})
         status_to_set = 'failed'
-        caption_to_store = f"S3 Download Error: {e.message}"
+        caption_to_store = f"S3 Download Error: {e.message}" # More specific message for DB
         return_payload = {
-            'status': 'error',
-            's3_key': object_key,
-            'error_type': 'S3Error',
-            'message': e.message
+            'status': 'error', 's3_key': object_key, 'error_type': e.__class__.__name__,
+            'error_code': e.error_code, 'message': e.message
         }
         exception_caught_during_processing = e
         
     except GeminiAPIError as e:
-        logger.error(f"Gemini API error: {e.message}", extra={'request_id': aws_request_id})
+        logger.error(f"Gemini API error for '{object_key}': {e.message} (Code: {e.error_code})", 
+                     extra={'request_id': aws_request_id})
         status_to_set = 'failed'
-        caption_to_store = f"Gemini API Error: {e.message}"
+        caption_to_store = f"Gemini API Error: {e.message}" # More specific message for DB
         return_payload = {
-            'status': 'error',
-            's3_key': object_key,
-            'error_type': 'GeminiAPIError',
-            'message': e.message
+            'status': 'error', 's3_key': object_key, 'error_type': e.__class__.__name__,
+            'error_code': e.error_code, 'message': e.message
         }
         exception_caught_during_processing = e
         
-    except ConfigurationError as e:
-        logger.error(f"Configuration error: {e.message}", extra={'request_id': aws_request_id})
+    except ConfigurationError as e: # Catch config errors (e.g., missing API key)
+        logger.error(f"Configuration error for '{object_key}': {e.message} (Code: {e.error_code})", 
+                     extra={'request_id': aws_request_id})
         status_to_set = 'failed'
         caption_to_store = f"Configuration Error: {e.message}"
         return_payload = {
-            'status': 'error',
-            's3_key': object_key,
-            'error_type': 'ConfigurationError',
-            'message': e.message
+            'status': 'error', 's3_key': object_key, 'error_type': e.__class__.__name__,
+            'error_code': e.error_code, 'message': e.message
         }
         exception_caught_during_processing = e
-        
-    except Exception as e:
-        logger.critical(f"Unexpected error: {str(e)}", exc_info=True,
-                       extra={'request_id': aws_request_id})
+
+    except ValueError as e: # Catch ValueError from empty image_bytes
+        logger.error(f"ValueError (likely empty image data) for '{object_key}': {str(e)}",
+                     extra={'request_id': aws_request_id})
         status_to_set = 'failed'
-        caption_to_store = f"Unexpected processing error: {str(e)}"
+        caption_to_store = f"ValueError: {str(e)}"
         return_payload = {
-            'status': 'error',
-            's3_key': object_key,
-            'error_type': 'UnexpectedError',
-            'message': caption_to_store
+            'status': 'error', 's3_key': object_key, 'error_type': 'ValueError',
+            'error_code': 'EMPTY_IMAGE_DATA', 'message': str(e)
         }
         exception_caught_during_processing = COMP5349A2Error(
-            "Unexpected error during image processing",
-            error_code='UNEXPECTED_ERROR',
+            f"ValueError during processing: {str(e)}",
+            error_code='EMPTY_IMAGE_DATA_ERROR', # More specific internal code
+            original_exception=e
+        )
+
+    except Exception as e: # Catch-all for other unexpected errors
+        logger.critical(f"Unexpected critical error during processing of '{object_key}': {str(e)}", 
+                        exc_info=True, extra={'request_id': aws_request_id})
+        status_to_set = 'failed'
+        caption_to_store = f"Unexpected processing error: {str(e)}"
+        # Ensure return_payload is structured for error
+        return_payload = {
+            'status': 'error', 's3_key': object_key, 'error_type': 'UnexpectedError',
+            'error_code': 'PROCESSING_UNEXPECTED_ERROR', 'message': caption_to_store
+        }
+        exception_caught_during_processing = COMP5349A2Error(
+            f"Unexpected error during image processing for {object_key}: {str(e)}",
+            error_code='ANNOTATION_UNEXPECTED_ERROR', # Specific error code for this type of failure
             original_exception=e
         )
     
-    # Database update try-except block
+    # --- Database Update Section ---
+    # This section will always attempt to update the DB with the determined status.
     try:
         db_conn = _get_db_connection_lambda(aws_request_id)
-        update_success = _update_caption_in_db(
-            db_conn, object_key, caption_to_store, status_to_set, aws_request_id
+        logger.info(f"Attempting to update database for '{object_key}' (file: '{original_filename}') with status '{status_to_set}'", 
+                   extra={'request_id': aws_request_id})
+        _update_caption_in_db(
+            db_conn=db_conn,
+            filename=original_filename, 
+            s3_key_original=object_key, 
+            annotation_text=caption_to_store, 
+            status=status_to_set, 
+            aws_request_id=aws_request_id
         )
-        
-        if not update_success:
-            logger.warning(f"Database update did not affect any rows for {object_key}",
-                          extra={'request_id': aws_request_id})
-            
-    except DatabaseError as db_e:
-        logger.error(f"Database error during status update: {db_e.message}",
-                    extra={'request_id': aws_request_id})
-        # If a processing error already occurred, log that we couldn't update its status.
-        # Otherwise, this db_e is the primary error to be raised.
-        if not exception_caught_during_processing:
+    except COMP5349A2Error as db_e: # Catch custom DB errors or config errors from _get_db_connection
+        logger.error(f"Database-related error while updating status for '{object_key}': {db_e.message} (Code: {db_e.error_code})", 
+                     extra={'request_id': aws_request_id})
+        if not exception_caught_during_processing: # If this is the first error we've encountered
             exception_caught_during_processing = db_e
-        else:
-            logger.error("Original processing error's status could not be updated in the database due to a subsequent DatabaseError.", extra={'request_id': aws_request_id})
-            
-    except Exception as db_unhandled_e: # Catch any other unhandled DB-related exceptions
-        logger.critical(f"Unhandled error during database operations: {str(db_unhandled_e)}",
-                       exc_info=True, extra={'request_id': aws_request_id})
+            # Update return_payload if it wasn't set by a processing error
+            return_payload = {
+                'status': 'error', 's3_key': object_key, 'error_type': db_e.__class__.__name__,
+                'error_code': db_e.error_code, 
+                'message': f"DB update failed after processing: {db_e.message}"
+            }
+        else: # A processing error already occurred, this DB error is secondary
+            logger.warning(f"Original processing error for '{object_key}' occurred. Subsequent DB error: {db_e.message}. The original error will be raised.", 
+                          extra={'request_id': aws_request_id})
+            # Ensure the original error's payload is what's considered, but log this DB issue.
+            if 'message' in return_payload and not return_payload['message'].endswith(db_e.message):
+                 return_payload['message'] += f" | DB Update Issue: {db_e.message}"
+
+
+    except Exception as final_db_e: # Catch any other unhandled DB-related exceptions
+        logger.critical(f"Unexpected critical error during final database update for '{object_key}': {str(final_db_e)}", 
+                        exc_info=True, extra={'request_id': aws_request_id})
         if not exception_caught_during_processing:
             exception_caught_during_processing = COMP5349A2Error(
-                f"Unhandled error during database operations: {str(db_unhandled_e)}",
-                error_code='DB_UNHANDLED_ERROR',
-                original_exception=db_unhandled_e
+                f"Unexpected error during final DB update for {object_key}: {str(final_db_e)}",
+                error_code='DB_FINAL_UNEXPECTED_ERROR',
+                original_exception=final_db_e
             )
-        else:
-            logger.error("Original processing error's status could not be updated in the database due to an unhandled exception during DB ops.", extra={'request_id': aws_request_id})
+            return_payload = { # Ensure payload reflects this new primary error
+                'status': 'error', 's3_key': object_key, 
+                'error_type': exception_caught_during_processing.__class__.__name__,
+                'error_code': exception_caught_during_processing.error_code, 
+                'message': exception_caught_during_processing.message
+            }
+        else: # A processing error already occurred
+             logger.warning(f"Original processing error for '{object_key}' occurred. Subsequent unhandled DB error: {str(final_db_e)}. The original error will be raised.", 
+                          extra={'request_id': aws_request_id})
+             if 'message' in return_payload and not return_payload['message'].endswith(str(final_db_e)):
+                 return_payload['message'] += f" | Unhandled DB Update Issue: {str(final_db_e)}"
         
     finally:
         if db_conn:
             try:
                 db_conn.close()
-                logger.info("Database connection closed",
-                           extra={'request_id': aws_request_id})
-            except Exception as e:
-                logger.error(f"Error closing database connection: {str(e)}",
-                           extra={'request_id': aws_request_id})
-    
-    # Return or re-raise
+                logger.info("Database connection closed.", extra={'request_id': aws_request_id})
+            except Exception as e: # pylint: disable=broad-except
+                logger.error(f"Error closing database connection: {str(e)}", 
+                               extra={'request_id': aws_request_id})
+
     if exception_caught_during_processing:
-        raise exception_caught_during_processing
-        
-    logger.info("Lambda invocation completed successfully",
-                extra={'request_id': aws_request_id})
+        logger.info(f"Lambda invocation failed for '{object_key}', re-raising exception: {type(exception_caught_during_processing).__name__}", 
+                   extra={'request_id': aws_request_id})
+        raise exception_caught_during_processing # Raise the primary exception
+    
+    # If we reach here, it means processing was successful and DB update was attempted (outcome logged)
+    # and no exception_caught_during_processing was (re)assigned a primary error status from the DB block.
+    logger.info(f"Lambda invocation completed for '{object_key}'. Status: {return_payload.get('status', 'unknown')}", 
+               extra={'request_id': aws_request_id, 'final_payload': return_payload})
     return return_payload 
+
+# --- Helper function to handle exceptions and update DB ---
+def _handle_exception_and_update_db(db_conn, filename, s3_key, error_message_for_db, exception_obj, aws_request_id):
+    """Helper to update DB when an exception occurs during processing."""
+    # ---- TEMPORARY DEBUG LOG ----
+    logger.critical(f"[_handle_exception_and_update_db] Received error_message_for_db: '{error_message_for_db}' (Type: {type(error_message_for_db)})")
+    # ---- END TEMPORARY DEBUG LOG ----
+    if db_conn:
+        try:
+            log_error_detail = exception_obj.message if hasattr(exception_obj, 'message') else str(exception_obj)
+            logger.info(f"Attempting to update database for '{s3_key}' (file: '{filename}') with status 'failed' due to error: {log_error_detail}", 
+                        extra={'request_id': aws_request_id})
+            
+            _update_caption_in_db(db_conn, filename, s3_key, error_message_for_db, 'failed', aws_request_id)
+            
+        except Exception as db_update_e:
+            logger.error(f"CRITICAL: Failed to update DB status for {s3_key} after a processing error. DB Error: {db_update_e}", 
+                         extra={'request_id': aws_request_id})
+    else:
+        logger.warning(f"No DB connection available to update status for {s3_key} after error: {str(exception_obj)}",
+                       extra={'request_id': aws_request_id}) 

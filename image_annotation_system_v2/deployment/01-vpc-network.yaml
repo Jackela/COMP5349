@@ -4,7 +4,7 @@ Description: CloudFormation template for COMP5349 Assignment 2 - VPC and Network
 Parameters:
   EnvironmentName:
     Type: String
-    Default: "COMP5349A2"
+    Default: "comp5349a2"
     Description: A prefix for resource names to ensure uniqueness and identification.
   VPCCIDR:
     Type: String
@@ -28,7 +28,6 @@ Parameters:
     Description: CIDR block for Private Subnet 2 (AZ2).
 
 Resources:
-  # VPC
   VPC:
     Type: AWS::EC2::VPC
     Properties:
@@ -39,7 +38,6 @@ Resources:
         - Key: Name
           Value: !Sub "${EnvironmentName}-VPC"
 
-  # Internet Gateway
   InternetGateway:
     Type: AWS::EC2::InternetGateway
     Properties:
@@ -47,14 +45,12 @@ Resources:
         - Key: Name
           Value: !Sub "${EnvironmentName}-IGW"
 
-  # Attach Internet Gateway to VPC
   VPCGatewayAttachment:
     Type: AWS::EC2::VPCGatewayAttachment
     Properties:
       VpcId: !Ref VPC
       InternetGatewayId: !Ref InternetGateway
 
-  # Public Subnets
   PublicSubnet1:
     Type: AWS::EC2::Subnet
     Properties:
@@ -77,7 +73,6 @@ Resources:
         - Key: Name
           Value: !Sub "${EnvironmentName}-PublicSubnet-AZ2"
 
-  # Private Subnets
   PrivateSubnet1:
     Type: AWS::EC2::Subnet
     Properties:
@@ -100,8 +95,7 @@ Resources:
         - Key: Name
           Value: !Sub "${EnvironmentName}-PrivateSubnet-AZ2"
 
-  # Elastic IP for NAT Gateway
-  EIPForNAT:
+  ElasticIP1:
     Type: AWS::EC2::EIP
     DependsOn: VPCGatewayAttachment
     Properties:
@@ -110,17 +104,15 @@ Resources:
         - Key: Name
           Value: !Sub "${EnvironmentName}-NAT-EIP"
 
-  # NAT Gateway
-  NATGateway:
+  NatGateway1:
     Type: AWS::EC2::NatGateway
     Properties:
-      AllocationId: !GetAtt EIPForNAT.AllocationId
+      AllocationId: !GetAtt ElasticIP1.AllocationId
       SubnetId: !Ref PublicSubnet1
       Tags:
         - Key: Name
-          Value: !Sub "${EnvironmentName}-NAT"
+          Value: !Sub "${EnvironmentName}-NATGateway"
 
-  # Route Tables
   PublicRouteTable:
     Type: AWS::EC2::RouteTable
     Properties:
@@ -162,7 +154,7 @@ Resources:
     Properties:
       RouteTableId: !Ref PrivateRouteTable
       DestinationCidrBlock: 0.0.0.0/0
-      NatGatewayId: !Ref NATGateway
+      NatGatewayId: !Ref NatGateway1
 
   PrivateSubnet1RouteTableAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
@@ -175,6 +167,57 @@ Resources:
     Properties:
       SubnetId: !Ref PrivateSubnet2
       RouteTableId: !Ref PrivateRouteTable
+
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "${EnvironmentName}-ALB-SG"
+      GroupDescription: "Security group for Application Load Balancer"
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: "Allow HTTP traffic from anywhere"
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-ALB-SG"
+
+  EC2InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "${EnvironmentName}-EC2-SG"
+      GroupDescription: "Security group for EC2 instances"
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-EC2-SG"
+
+  DBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "${EnvironmentName}-DB-SG"
+      GroupDescription: "Security group for Database (e.g., RDS)"
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !GetAtt LambdaSecurityGroup.GroupId
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-DB-SG"
+
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "${EnvironmentName}-Lambda-SG"
+      GroupDescription: "Security group for Lambda functions if they need VPC access"
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-Lambda-SG"
 
 Outputs:
   VPCID:
@@ -217,4 +260,28 @@ Outputs:
     Description: ID of the Private Route Table
     Value: !Ref PrivateRouteTable
     Export:
-      Name: !Sub "${AWS::StackName}-PrivateRouteTableID" 
+      Name: !Sub "${AWS::StackName}-PrivateRouteTableID"
+
+  ALBSecurityGroupID:
+    Description: ID of the ALB Security Group
+    Value: !GetAtt ALBSecurityGroup.GroupId
+    Export:
+      Name: !Sub "${AWS::StackName}-ALBSecurityGroupID"
+
+  EC2InstanceSecurityGroupID:
+    Description: ID of the EC2 Instance Security Group
+    Value: !GetAtt EC2InstanceSecurityGroup.GroupId
+    Export:
+      Name: !Sub "${AWS::StackName}-EC2InstanceSecurityGroupID"
+
+  DBSecurityGroupID:
+    Description: ID of the Database Security Group
+    Value: !GetAtt DBSecurityGroup.GroupId
+    Export:
+      Name: !Sub "${AWS::StackName}-DBSecurityGroupID"
+
+  LambdaSecurityGroupID:
+    Description: ID of the Lambda Security Group
+    Value: !GetAtt LambdaSecurityGroup.GroupId
+    Export:
+      Name: !Sub "${AWS::StackName}-LambdaSecurityGroupID"

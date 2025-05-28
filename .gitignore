@@ -138,3 +138,5 @@ logs/
 
 # Lambda function packaged dependencies (if not using Docker layers or if Docker build handles it)
 **/package/ 
+*.j2
+/.llm-context

@@ -221,13 +221,14 @@ Purpose: 提供与RDS MySQL数据库交互的工具函数，包括连接管理�
   * **失败 (环境变量缺失)：** ERROR 级别，记录 "Database configuration environment variable(s) missing."  
   * **失败 (连接错误)：** ERROR 级别，记录 "Failed to connect to database {DB\_HOST}/{DB\_NAME}. Error: {error\_message}"。
 
-#### **save\_initial\_image\_meta(db\_conn, original\_s3\_key: str, request\_id: Optional\[str\] \= None) \-\> int**
+#### **save\_initial\_image\_meta(db\_conn, s3\_key\_original: str, filename: str, request\_id: Optional\[str\] \= None) \-\> int**
 
 * **Unique ID:** COMP5349\_A2-UTIL-DB-save\_initial\_image\_meta  
-* **职责 (Responsibility):** 在images表中插入一条新的图片元数据记录，状态默认为'pending'。  
+* **职责 (Responsibility):** 在images表中插入一条新的图片元数据记录，包含原始S3 key和文件名。状态字段将使用数据库默认值 ('pending')。  
 * **输入规范 (Detailed Input Specification):**  
   * db\_conn: 已建立的数据库连接对象。  
-  * original\_s3\_key (str): 图片在S3上的唯一键。此键在images表中应具有UNIQUE约束。  
+  * s3\_key\_original (str): 图片在S3上的唯一键。此键在images表中应具有UNIQUE约束。  
+  * filename (str): 图片的原始文件名。  
   * request\_id (Optional\[str\]): 用于日志追踪的请求ID。  
 * **输出规范 (Detailed Output Specification):**  
   * 成功时返回新插入记录的 id (通过 cursor.lastrowid)。  
@@ -236,21 +237,21 @@ Purpose: 提供与RDS MySQL数据库交互的工具函数，包括连接管理�
   1. 获取数据库游标 cursor \= db\_conn.cursor()。  
   2. 准备SQL INSERT语句：  
      INSERT INTO images   
-     (original\_s3\_key, uploaded\_at, caption\_status, thumbnail\_status)   
-     VALUES (%s, CURRENT\_TIMESTAMP, 'pending', 'pending')
+     (filename, s3\_key\_original)   
+     VALUES (%s, %s)
 
-  3. 使用参数化查询执行SQL: cursor.execute(sql, (original\_s3\_key,))。  
+  3. 使用参数化查询执行SQL: cursor.execute(sql, (filename, s3\_key\_original))。  
   4. 提交事务: db\_conn.commit()。  
   5. 获取新插入记录的ID: new\_id \= cursor.lastrowid。  
   6. 关闭游标: cursor.close()。  
 * **错误处理 (Error Handling):**  
   * 捕获 mysql.connector.Error 作为基类。  
-  * 如果 err.errno \== errorcode.ER\_DUP\_ENTRY (对于 mysql-connector-python)，则包装为 DatabaseError(message=f"Duplicate entry for original\_s3\_key: {original\_s3\_key}.", error\_code="DB\_UNIQUE\_VIOLATION", original\_exception=e) 抛出。  
-  * 其他 mysql.connector.Error 包装为通用的 DatabaseError (例如，message=f"Failed to save initial metadata for {original\_s3\_key}. Error: {e}") 抛出。  
+  * 如果 err.errno \== errorcode.ER\_DUP\_ENTRY (对于 mysql-connector-python)，则包装为 DatabaseError(message=f"Duplicate entry for s3\_key\_original: {s3\_key\_original}.", error\_code="DB\_UNIQUE\_VIOLATION", original\_exception=e) 抛出。  
+  * 其他 mysql.connector.Error 包装为通用的 DatabaseError (例如，message=f"Failed to save initial metadata for {s3\_key\_original}. Error: {e}") 抛出。  
   * 在异常情况下，应确保事务回滚（尽管对于单条INSERT且自动提交关闭时，连接关闭会自动回滚未提交事务，但显式回滚更安全，或者依赖于上层如Flask的teardown处理）。  
 * **日志记录要求 (Logging Requirements):**  
-  * **成功：** INFO 级别，记录 "Successfully saved initial metadata for {original\_s3\_key}, new\_id={new\_id}."，包含 request\_id。  
-  * **失败：** ERROR 级别，记录 "Failed to save initial metadata for {original\_s3\_key}. Error: {error\_message}"，包括 error\_code 和 request\_id。
+  * **成功：** INFO 级别，记录 "Successfully saved initial metadata for {s3\_key\_original} (filename: {filename}), new\_id={new\_id}."，包含 request\_id。  
+  * **失败：** ERROR 级别，记录 "Failed to save initial metadata for {s3\_key\_original}. Error: {error\_message}"，包括 error\_code 和 request\_id。
 
 #### **get\_all\_image\_data\_for\_gallery(db\_conn, request\_id: Optional\[str\] \= None) \-\> list\[dict\]**
 
@@ -260,14 +261,16 @@ Purpose: 提供与RDS MySQL数据库交互的工具函数，包括连接管理�
   * db\_conn: 已建立的数据库连接对象。  
   * request\_id (Optional\[str\]): 用于日志追踪的请求ID。  
 * **输出规范 (Detailed Output Specification):**  
-  * 返回一个字典列表。每个字典代表一条图片记录，key与images表的列名一致：id, original\_s3\_key, caption, thumbnail\_s3\_key, caption\_status, thumbnail\_status, uploaded\_at。  
-  * uploaded\_at 应为Python datetime.datetime 对象。  
+  * 返回一个字典列表。每个字典代表一条图片记录，key与images表的列名一致：id, filename, s3\_key\_original, s3\_key\_thumbnail, annotation, annotation\_status, thumbnail\_status, uploaded\_at, updated\_at。  
+  * uploaded\_at 和 updated\_at 应为Python datetime.datetime 对象。  
   * 列表按 uploaded\_at DESC (最新上传的在前) 排序。  
   * 如果查询失败，抛出 DatabaseError。  
 * **核心业务逻辑步骤 (Core Business Logic Steps):**  
   1. 获取数据库游标 cursor \= db\_conn.cursor(dictionary=True) (使用 dictionary=True 使结果行为字典)。  
   2. 准备SQL SELECT语句：  
-     SELECT id, original\_s3\_key, caption, thumbnail\_s3\_key, caption\_status, thumbnail\_status, uploaded\_at   
+     SELECT id, filename, s3\_key\_original, s3\_key\_thumbnail,   
+            annotation, annotation\_status, thumbnail\_status,   
+            uploaded\_at, updated\_at   
      FROM images   
      ORDER BY uploaded\_at DESC
 
@@ -282,19 +285,54 @@ Purpose: 提供与RDS MySQL数据库交互的工具函数，包括连接管理�
   * **查询结果为空：** INFO 级别，记录 "No images found for gallery."，包含 request\_id。  
   * **失败：** ERROR 级别，记录 "Database query failed for gallery. Error: {error\_message}"，包含 request\_id。
 
-#### **update\_caption\_in\_db(db\_conn, original\_s3\_key: str, caption\_text: Optional\[str\], status: str, request\_id: Optional\[str\] \= None) \-\> bool**
+#### **get\_image\_by\_id(db\_conn, image\_id: int, request\_id: Optional\[str\] \= None) \-\> Optional\[dict\]**
 
-* **Unique ID:** COMP5349\_A2-UTIL-DB-update\_caption\_in\_db  
-* **职责 (Responsibility):** 更新指定图片的标注文本和标注状态。  
+* **Unique ID:** COMP5349\_A2-UTIL-DB-get\_image\_by\_id  
+* **职责 (Responsibility):** 从images表中按ID检索单个图片的元数据。主要用于API端点。  
 * **输入规范 (Detailed Input Specification):**  
   * db\_conn: 已建立的数据库连接对象。  
-  * original\_s3\_key (str): 要更新记录的图片S3键。  
-  * caption\_text (Optional\[str\]): 生成的标注文本。如果 status 是 'failed'，此项可能为 None 或包含错误信息。  
+  * image\_id (int): 要检索的图片的ID。  
+  * request\_id (Optional\[str\]): 用于日志追踪的请求ID。  
+* **输出规范 (Detailed Output Specification):**  
+  * 返回一个包含图片记录的字典，如果找到。字段同 `get\_all\_image\_data\_for\_gallery`。  
+  * 如果未找到对应ID的记录，返回 None。  
+  * 如果查询失败，抛出 DatabaseError。  
+  * 如果 image\_id 无效，抛出 InvalidInputError。  
+* **核心业务逻辑步骤 (Core Business Logic Steps):**  
+  1. 校验 image\_id 是否为正整数。  
+  2. 获取数据库游标 cursor \= db\_conn.cursor(dictionary=True)。  
+  3. 准备SQL SELECT语句：  
+     SELECT id, filename, s3\_key\_original, s3\_key\_thumbnail,   
+            annotation, annotation\_status, thumbnail\_status,   
+            uploaded\_at, updated\_at   
+     FROM images   
+     WHERE id \= %s
+
+  4. 执行SQL: cursor.execute(sql, (image\_id,))。  
+  5. 获取结果: result \= cursor.fetchone()。  
+  6. 关闭游标: cursor.close()。  
+  7. 返回 result。  
+* **错误处理 (Error Handling):**  
+  * 查询失败时，捕获 mysql.connector.Error，包装为 DatabaseError 抛出。  
+  * image\_id 无效时，抛出 InvalidInputError。  
+* **日志记录要求 (Logging Requirements):**  
+  * **成功查询到数据：** INFO 级别，记录 "Retrieved image with id {image\_id}."，包含 request\_id。  
+  * **查询结果为空：** INFO 级别，记录 "Image with id {image\_id} not found."，包含 request\_id。  
+  * **失败：** ERROR 级别，记录 "Database query failed for image id {image\_id}. Error: {error\_message}"，包含 request\_id。
+
+#### **update\_annotation\_in\_db(db\_conn, s3\_key\_original: str, annotation\_text: Optional\[str\], status: str, request\_id: Optional\[str\] \= None) \-\> bool**
+
+* **Unique ID:** COMP5349\_A2-UTIL-DB-update\_annotation\_in\_db  
+* **职责 (Responsibility):** 更新指定图片的AI标注文本 (annotation) 和标注状态 (annotation\_status)。  
+* **输入规范 (Detailed Input Specification):**  
+  * db\_conn: 已建立的数据库连接对象。  
+  * s3\_key\_original (str): 要更新记录的图片S3键。  
+  * annotation\_text (Optional\[str\]): 生成的标注文本。如果 status 是 'failed'，此项可能为 None 或包含错误信息。  
   * status (str): 标注状态，必须是 'completed' 或 'failed'。函数内部应校验。如果无效，抛出 InvalidInputError。  
   * request\_id (Optional\[str\]): 用于日志追踪的请求ID (通常是Lambda的 aws\_request\_id)。  
 * **输出规范 (Detailed Output Specification):**  
   * 成功更新且影响了至少一行记录时返回 True。  
-  * 如果未找到对应 original\_s3\_key 的记录 (即 cursor.rowcount \== 0)，返回 False 并记录警告。  
+  * 如果未找到对应 s3\_key\_original 的记录 (即 cursor.rowcount \== 0)，返回 False 并记录警告。  
   * 如果输入 status 无效，抛出 InvalidInputError。  
   * 如果数据库操作失败，抛出 DatabaseError。  
 * **核心业务逻辑步骤 (Core Business Logic Steps):**  
@@ -302,10 +340,10 @@ Purpose: 提供与RDS MySQL数据库交互的工具函数，包括连接管理�
   2. 获取数据库游标 cursor \= db\_conn.cursor()。  
   3. 准备SQL UPDATE语句：  
      UPDATE images   
-     SET caption \= %s, caption\_status \= %s   
-     WHERE original\_s3\_key \= %s
+     SET annotation \= %s, annotation\_status \= %s   
+     WHERE s3\_key\_original \= %s
 
-  4. 执行SQL: cursor.execute(sql, (caption\_text, status, original\_s3\_key))。  
+  4. 执行SQL: cursor.execute(sql, (annotation\_text, status, s3\_key\_original))。  
   5. 提交事务: db\_conn.commit()。  
   6. 检查影响的行数: affected\_rows \= cursor.rowcount。  
   7. 关闭游标: cursor.close()。  
@@ -313,47 +351,48 @@ Purpose: 提供与RDS MySQL数据库交互的工具函数，包括连接管理�
 * **错误处理 (Error Handling):**  
   * 捕获 mysql.connector.Error，包装为 DatabaseError 抛出。  
 * **日志记录要求 (Logging Requirements):**  
-  * **成功更新：** INFO 级别，记录 "Updated caption for {original\_s3\_key} to status {status}. Affected rows: {affected\_rows}." (如果 caption\_text 过长，不建议全量记录，可记录其摘要或长度)，包含 request\_id。  
-  * **记录未找到:** WARNING 级别，当 affected\_rows \== 0 时记录 "{original\_s3\_key} not found in DB for caption update."，包含 request\_id。  
-  * **无效状态参数：** ERROR 级别，记录 "Invalid status parameter '{status}' for update\_caption\_in\_db."，包含 request\_id。  
-  * **数据库操作失败：** ERROR 级别，记录 "Failed to update caption for {original\_s3\_key}. Error: {error\_message}."，包含 request\_id。  
+  * **成功更新：** INFO 级别，记录 "Updated annotation for {s3\_key\_original} to status {status}. Affected rows: {affected\_rows}."，包含 request\_id。  
+  * **记录未找到:** WARNING 级别，当 affected\_rows \== 0 时记录 "{s3\_key\_original} not found in DB for annotation update."，包含 request\_id。  
+  * **无效状态参数：** ERROR 级别，记录 "Invalid status parameter '{status}' for update\_annotation\_in\_db."，包含 request\_id。  
+  * **数据库操作失败：** ERROR 级别，记录 "Failed to update annotation for {s3\_key\_original}. Error: {error\_message}."，包含 request\_id。  
 * **验收标准/关键测试用例 (Acceptance Criteria / Key Test Cases):**  
-  * test\_update\_caption\_success\_completed  
-  * test\_update\_caption\_success\_failed\_with\_error\_message\_in\_caption  
-  * test\_update\_caption\_invalid\_status\_param\_raises\_InvalidInputError  
-  * test\_update\_caption\_s3\_key\_not\_found\_returns\_false\_and\_logs\_warning  
-  * test\_update\_caption\_db\_error\_raises\_DatabaseError
+  * test\_update\_annotation\_success\_completed  
+  * test\_update\_annotation\_success\_failed\_with\_error\_message\_in\_annotation  
+  * test\_update\_annotation\_invalid\_status\_param\_raises\_InvalidInputError  
+  * test\_update\_annotation\_s3\_key\_not\_found\_returns\_false\_and\_logs\_warning  
+  * test\_update\_annotation\_db\_error\_raises\_DatabaseError
 
-#### **update\_thumbnail\_info\_in\_db(db\_conn, original\_s3\_key: str, thumbnail\_s3\_key: Optional\[str\], status: str, request\_id: Optional\[str\] \= None) \-\> bool**
+#### **update\_thumbnail\_info\_in\_db(db\_conn, s3\_key\_original: str, s3\_key\_thumbnail: Optional\[str\], status: str, request\_id: Optional\[str\] \= None) \-\> bool**
 
 * **Unique ID:** COMP5349\_A2-UTIL-DB-update\_thumbnail\_info\_in\_db  
-* **职责 (Responsibility):** 更新指定图片的缩略图S3 key和缩略图生成状态。  
+* **职责 (Responsibility):** 更新指定图片的缩略图S3 key (s3\_key\_thumbnail) 和缩略图生成状态 (thumbnail\_status)。  
 * **输入规范 (Detailed Input Specification):**  
   * db\_conn: 已建立的数据库连接对象。  
-  * original\_s3\_key (str): 要更新记录的原始图片S3键。  
-  * thumbnail\_s3\_key (Optional\[str\]): 生成的缩略图S3键。如果 status 是 'failed'，此项应为 None。  
+  * s3\_key\_original (str): 要更新记录的原始图片S3键。  
+  * s3\_key\_thumbnail (Optional\[str\]): 生成的缩略图S3键。如果 status 是 'failed'，此项应为 None。  
   * status (str): 缩略图生成状态，必须是 'completed' 或 'failed'。函数内部应校验。如果无效，抛出 InvalidInputError。  
   * request\_id (Optional\[str\]): 用于日志追踪的请求ID (通常是Lambda的 aws\_request\_id)。  
 * **输出规范 (Detailed Output Specification):**  
   * 成功更新且影响了至少一行记录时返回 True。  
-  * 如果未找到对应 original\_s3\_key 的记录，返回 False 并记录警告。  
+  * 如果未找到对应 s3\_key\_original 的记录，返回 False 并记录警告。  
   * 如果输入 status 无效，抛出 InvalidInputError。  
   * 如果数据库操作失败，抛出 DatabaseError。  
 * **核心业务逻辑步骤 (Core Business Logic Steps):**  
   1. 校验 status 参数。  
-  2. 获取数据库游标 cursor \= db\_conn.cursor()。  
-  3. 准备SQL UPDATE语句：  
+  2. 如果 status == 'failed' 且 s3\_key\_thumbnail 不为 None, 则将 s3\_key\_thumbnail 设为 None。  
+  3. 获取数据库游标 cursor \= db\_conn.cursor()。  
+  4. 准备SQL UPDATE语句：  
      UPDATE images   
-     SET thumbnail\_s3\_key \= %s, thumbnail\_status \= %s   
-     WHERE original\_s3\_key \= %s
+     SET s3\_key\_thumbnail \= %s, thumbnail\_status \= %s   
+     WHERE s3\_key\_original \= %s
 
-  4. 执行SQL: cursor.execute(sql, (thumbnail\_s3\_key, status, original\_s3\_key))。  
-  5. 提交事务: db\_conn.commit()。  
-  6. 检查影响的行数并返回。  
-  7. 关闭游标。  
-* **错误处理 (Error Handling):** 同 update\_caption\_in\_db。  
-* **日志记录要求 (Logging Requirements):** 类似 update\_caption\_in\_db，将 "caption" 替换为 "thumbnail info"。  
-* **验收标准/关键测试用例 (Acceptance Criteria / Key Test Cases):** 类似 update\_caption\_in\_db 的测试用例，适配缩略图场景。
+  5. 执行SQL: cursor.execute(sql, (s3\_key\_thumbnail, status, s3\_key\_original))。  
+  6. 提交事务: db\_conn.commit()。  
+  7. 检查影响的行数并返回。  
+  8. 关闭游标。  
+* **错误处理 (Error Handling):** 同 update\_annotation\_in\_db。  
+* **日志记录要求 (Logging Requirements):** 类似 update\_annotation\_in\_db，将 "annotation" 替换为 "thumbnail info"。  
+* **验收标准/关键测试用例 (Acceptance Criteria / Key Test Cases):** 类似 update\_annotation\_in\_db 的测试用例，适配缩略图场景。
 
 ### **3\. web\_app/app.py (Flask Application Routes and Logic)**
 
@@ -376,6 +415,7 @@ Purpose: 定义Flask Web应用，包括路由、请求处理器和整体应用�
   app.config\['SECRET\_KEY'\] \= os.environ.get('FLASK\_SECRET\_KEY', 'a\_very\_secret\_dev\_key\_for\_development\_only')  
   app.config\['MAX\_CONTENT\_LENGTH'\] \= 16 \* 1024 \* 1024  \# 16 MB  
   app.config\['S3\_IMAGE\_BUCKET'\] \= os.environ.get('S3\_IMAGE\_BUCKET')  
+  app.config\['S3\_THUMBNAIL\_BUCKET'\] \= os.environ.get('S3\_THUMBNAIL\_BUCKET') \# 新增，对应 CloudFormation  
   app.config\['ALLOWED\_EXTENSIONS'\] \= {'png', 'jpg', 'jpeg', 'gif'}  
   \# TODO: Configure logger instance (app.logger) to use JSON formatter and set LOG\_LEVEL from env
 
@@ -522,11 +562,13 @@ Purpose: 定义Flask Web应用，包括路由、请求处理器和整体应用�
   6. 使用 allowed\_file() 验证文件类型。  
   7. 使用 secure\_filename() 清理文件名。  
   8. 生成唯一的 s3\_key: f"{uuid.uuid4().hex}.{filename.rsplit('.', 1)\[1\].lower()}"。记录 s3\_key。  
+     (注意：实际代码中 filename\_secure = secure\_filename(file.filename) 后，s3\_key\_original = f"uploads/{uuid.uuid4().hex}-{filename\_secure}")
+     设计文档中应统一为 `s3\_key\_original`，并指明其包含 `uploads/` 前缀和UUID及安全文件名。
   9. 使用 get\_mime\_type(filename) 确定 content\_type。  
   10. try...except (S3InteractionError, DatabaseError, InvalidInputError, ConfigurationError) as e:  
       * **Inside try:**  
-        * 调用 s3\_utils.upload\_file\_to\_s3(file, app.config\['S3\_IMAGE\_BUCKET'\], s3\_key, content\_type, request\_id=g.request\_id)。 (FileStorage对象通常可以直接传递给 upload\_fileobj，它有 read 方法)。  
-        * 调用 db\_utils.save\_initial\_image\_meta(g.db\_conn, s3\_key, request\_id=g.request\_id)。  
+        * 调用 s3\_utils.upload\_file\_to\_s3(file, app.config\['S3\_IMAGE\_BUCKET'\], s3\_key\_original, content\_type, request\_id=g.request\_id)。 (FileStorage对象通常可以直接传递给 upload\_fileobj，它有 read 方法)。  
+        * 调用 db\_utils.save\_initial\_image\_meta(g.db\_conn, s3\_key\_original, filename, request\_id=g.request\_id)。 (filename 是原始文件名)  
         * flash(f"Image '{filename}' uploaded successfully and is being processed.", 'success')。  
         * return redirect(url\_for('gallery\_get'))。  
       * **Inside except e:** (这些自定义异常应由全局错误处理器处理，或者如果希望在此处提供更具体的页面上下文，则局部处理)  
@@ -562,14 +604,16 @@ Purpose: 定义Flask Web应用，包括路由、请求处理器和整体应用�
   * **成功:** HTTP 200 OK。渲染 gallery.html。  
   * **传递给模板的数据结构 (processed\_images):** List\[Dict\[str, Any\]\]，每个字典包含：  
     * id: int  
-    * original\_s3\_key: str  
-    * original\_image\_url: Optional\[str\] (预签名URL)  
-    * thumbnail\_s3\_key: Optional\[str\]  
-    * thumbnail\_image\_url: Optional\[str\] (预签名URL 或 None)  
-    * caption: Optional\[str\] (之前是 caption\_text)  
-    * caption\_status: str ('pending', 'completed', 'failed')  
+    * filename: str  
+    * s3\_key\_original: str  
+    * original\_image\_url: Optional\[str\] (预签名URL, 从 S3\_IMAGE\_BUCKET 获取)  
+    * s3\_key\_thumbnail: Optional\[str\]  
+    * thumbnail\_image\_url: Optional\[str\] (预签名URL, 从 S3\_THUMBNAIL\_BUCKET 获取, 或 None)  
+    * annotation: Optional\[str\]  
+    * annotation\_status: str ('pending', 'completed', 'failed')  
     * thumbnail\_status: str ('pending', 'completed', 'failed')  
     * uploaded\_at: datetime.datetime (Python datetime 对象)  
+    * updated\_at: datetime.datetime (Python datetime 对象)  
 * **核心业务逻辑步骤:**  
   1. 记录画廊加载开始，包含 g.request\_id。  
   2. 检查 g.db\_conn 是否为 None。如果是，flash "Database connection error." 并渲染 gallery.html，传递 images=\[\] 和错误消息。  
@@ -581,8 +625,8 @@ Purpose: 定义Flask Web应用，包括路由、请求处理器和整体应用�
          * 复制记录到 img\_data。  
          * 设置 img\_data\['original\_image\_url'\] \= None 和 img\_data\['thumbnail\_image\_url'\] \= None 作为默认值。  
          * try...except S3InteractionError as s3\_e\_presign: (针对预签名URL生成失败)  
-           * 如果 record\['original\_s3\_key'\] 存在，调用 s3\_utils.generate\_presigned\_url(...) 获取 original\_image\_url。  
-           * 如果 record\['thumbnail\_s3\_key'\] 存在且 record\['thumbnail\_status'\] \== 'completed'，调用 s3\_utils.generate\_presigned\_url(...) 获取 thumbnail\_image\_url。  
+           * 如果 record\['s3\_key\_original'\] 存在，调用 s3\_utils.generate\_presigned\_url(app.config\['S3\_IMAGE\_BUCKET'\], record\['s3\_key\_original\'], ...) 获取 original\_image\_url。  
+           * 如果 record\['s3\_key\_thumbnail'\] 存在且 record\['thumbnail\_status'\] \== 'completed'，调用 s3\_utils.generate\_presigned\_url(app.config\['S3\_THUMBNAIL\_BUCKET'\], record\['s3\_key\_thumbnail\'], ...) 获取 thumbnail\_image\_url。  
            * 在 except s3\_e\_presign 中记录错误，对应的URL将保持为 None，模板应能处理此情况。  
          * 将 img\_data 添加到 processed\_images。  
        * 渲染 gallery.html，传递 images=processed\_images。  
@@ -611,6 +655,58 @@ Purpose: 定义Flask Web应用，包括路由、请求处理器和整体应用�
   * test\_gallery\_get\_db\_failure\_triggers\_error\_handler  
   * test\_gallery\_get\_s3\_presigned\_url\_failure\_for\_one\_image\_still\_renders\_others\_and\_logs\_error  
   * test\_gallery\_get\_handles\_pending\_and\_failed\_statuses\_correctly\_in\_data\_passed\_to\_template
+
+#### **Route: GET /api/image_status/<int:image_id> (New API Endpoint)**
+
+* **Unique ID:** COMP5349_A2-WEB-APPMAIN-api_image_status_get
+* **职责:** 提供单个图片处理状态的API接口，用于前端轮询更新。
+* **接口:** HTTP GET 到 /api/image_status/<image_id>。
+* **前置条件:** 数据库连接 (g.db_conn) 可用。
+* **后置条件:** 返回JSON响应，包含图片状态信息和处理完成后的图片URL。
+* **输出规范 (JSON响应):**
+  * **成功 (找到图片):** HTTP 200 OK。
+    {
+      "id": int,
+      "filename": str,
+      "annotation_status": str, // 'pending', 'completed', 'failed'
+      "thumbnail_status": str,  // 'pending', 'completed', 'failed'
+      "annotation": Optional[str],
+      "thumbnail_url": Optional[str] // 预签名URL, 从 S3_THUMBNAIL_BUCKET 获取
+    }
+  * **图片未找到:** HTTP 404 Not Found。
+    { "error": "Image not found" }
+  * **数据库错误:** HTTP 500 Internal Server Error。
+    { "error": "Database error" }
+* **核心业务逻辑步骤:**
+  1. 记录API请求开始，包含 g.request_id 和 image_id。
+  2. 检查 g.db_conn 是否为 None。如果是，返回500 JSON错误。
+  3. try...except (DatabaseError, S3InteractionError, InvalidInputError) as e:
+     * **Inside try:**
+       * 调用 record = db_utils.get_image_by_id(g.db_conn, image_id, request_id=g.request_id)。
+       * 如果 record is None，返回404 JSON错误。
+       * 准备响应字典: response_data = {...} 包含 id, filename, annotation_status, thumbnail_status, annotation。
+       * 设置 response_data['thumbnail_url'] = None。
+       * 如果 record['s3_key_thumbnail'] 且 record['thumbnail_status'] == 'completed':
+         * 调用 s3_utils.generate_presigned_url(app.config['S3_THUMBNAIL_BUCKET'], record['s3_key_thumbnail'], ...) 获取 thumbnail_url。
+         * response_data['thumbnail_url'] = thumbnail_url。
+       * 返回 jsonify(response_data), 200。
+     * **Inside except e:**
+       * 记录错误。
+       * 如果是 InvalidInputError (e.g., image_id 格式问题)，返回400 JSON错误。
+       * 其他返回500 JSON错误。
+* **交互契约:**
+  * 调用 COMP5349_A2-UTIL-DB-get_image_by_id。
+  * 可能调用 COMP5349_A2-UTIL-S3-generate_presigned_url (针对 S3_THUMBNAIL_BUCKET)。
+* **日志记录要求:**
+  * INFO: "GET /api/image_status/{image_id} - Request received.", request_id。
+  * INFO: "Image status for id {image_id}: annotation_status={...}, thumbnail_status={...}.", request_id。
+  * ERROR: (各种错误情况)。
+* **测试用例:**
+  * test_api_image_status_get_found_pending_returns_correct_json
+  * test_api_image_status_get_found_completed_returns_correct_json_with_urls
+  * test_api_image_status_get_not_found_returns_404_json
+  * test_api_image_status_get_db_error_returns_500_json
+  * test_api_image_status_get_s3_presign_fail_returns_null_thumbnail_url
 
 #### **Route: GET /health (Health Check for ALB)**
 
@@ -653,28 +749,29 @@ Purpose: 当新图片上传到S3的 `uploads/` 目录后，此Lambda被触发。
 *   **触发器 (Trigger):** AWS S3 (ObjectCreated via EventBridge)
     *   事件源: `aws.s3`
     *   事件类型: `Object Created`
-    *   S3桶: 主图片桶 (从环境变量 `S3_IMAGE_BUCKET` 或CloudFormation导入的 `${AppStorageStackName}-OriginalImagesBucketName` 获取)
-    *   对象键前缀 (Object Key Prefix): `uploads/`
+    *   S3桶: 原始图片桶 (即 `OriginalImagesBucket`, Lambda从S3事件中直接获取桶名)
+    *   对象键前缀 (Object Key Prefix): `uploads/` (Lambda内部逻辑会检查此前缀)
 *   **核心职责 (Core Responsibilities):**
     1.  从S3事件中解析出bucket名和object key。
-    2.  **重要：过滤掉由 `thumbnail_lambda` 生成的缩略图对象，避免循环触发。** 缩略图通常存放在如 `thumbnails/` 前缀下。此Lambda只处理原始上传 (`uploads/`) 的图片。
-    3.  从S3下载原始图片字节流。
+    2.  **重要：过滤掉由 `thumbnail_lambda` 生成的缩略图对象，以及非 `uploads/` 前缀的对象，避免循环触发或处理非预期文件。** 此Lambda只处理原始上传 (`uploads/`) 的图片。
+    3.  从S3下载原始图片字节流 (来自 `OriginalImagesBucket`)。
     4.  **调用Google Gemini API进行图像描述：**
         *   **SDK 使用:** 明确使用 `google-generativeai` Python SDK。
         *   **认证方式:** 使用存储在环境变量 `GEMINI_API_KEY` 中的API密钥。
         *   **模型:** 使用环境变量 `GEMINI_MODEL_NAME` 指定的模型 (例如 `gemini-1.5-flash-latest` 或 `gemini-1.0-pro-vision`)。
         *   **Prompt:** 使用环境变量 `GEMINI_PROMPT` 指定的提示文本。
-        *   **输入:** 图片字节流和提示文本。
+        *   **输入:** 图片字节流 (使用 `python-magic` 库识别MIME类型，确保为支持的图片格式) 和提示文本。
         *   **输出:** 生成的文本描述。
         *   **注意：** **不应**在此处使用 `google-cloud-aiplatform` (Vertex AI) SDK 或服务账户认证方式来调用Gemini进行图像理解，除非项目明确更改为此方案。当前设计是直接通过 `google-generativeai` SDK 和 API Key。
     5.  连接到RDS MySQL数据库。
-    6.  将获取到的图片描述 (caption)、S3原始图片key、文件名、以及状态 ('completed' 或 'failed') 更新到数据库的 `images` 表中 (这是一个 UPSERT 操作：如果记录已存在则更新，否则插入)。
+    6.  将获取到的图片描述 (annotation) 和状态 ('completed' 或 'failed') 更新到数据库的 `images` 表中，基于 `s3_key_original`。 (实际实现是调用 `_update_annotation_in_db` 辅助函数)
 *   **环境变量 (Environment Variables):**
+        *   `DB_HOST`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`, `DB_PORT`: 数据库连接参数。
         *   `GEMINI_API_KEY`: Google Gemini API 密钥。
         *   `GEMINI_MODEL_NAME`: 使用的Gemini模型名称。
         *   `GEMINI_PROMPT`: 调用Gemini API时使用的提示文本。
         *   `LOG_LEVEL`: 日志级别。
-        *   `S3_ORIGINAL_IMAGES_BUCKET_NAME`: 原始图片S3桶名 (通过CloudFormation导入)。
+        *   (隐式) `S3_ORIGINAL_IMAGES_BUCKET_NAME`: 虽然CloudFormation中可能定义了这个变量，但Lambda通常直接从S3事件中获取源桶名，因此该环境变量在Lambda代码中可能不直接使用。
 *   **错误处理 (Error Handling):**
     *   S3下载错误: 抛出 `S3InteractionError`，记录错误，更新DB状态为 'failed' 并记录错误信息。
     *   Gemini API调用错误 (包括配置错误如API Key缺失、API限流、内容安全阻止等): 抛出 `GeminiAPIError` 或 `ConfigurationError`，记录错误，更新DB状态为 'failed' 并记录错误信息。
@@ -682,29 +779,27 @@ Purpose: 当新图片上传到S3的 `uploads/` 目录后，此Lambda被触发。
     *   输入事件解析错误: 抛出 `InvalidInputError`。
     *   所有未捕获的异常应被捕获，记录CRITICAL日志，并确保Lambda以失败状态退出，以便触发重试或DLQ。
 *   **日志记录 (Logging):**
-        *   INFO: 开始处理图片 {s3_key}。
-        *   INFO: 成功下载图片 {s3_key}。
-        *   INFO: 调用Gemini API ({GEMINI_MODEL_NAME}) 处理图片 {s3_key}。
+        *   INFO: 开始处理图片 {s3_key_original} 来自桶 {source_bucket_name}。
+        *   INFO: 成功下载图片 {s3_key_original}。
+        *   INFO: 调用Gemini API ({GEMINI_MODEL_NAME}) 处理图片 {s3_key_original}。
         *   INFO: 成功从Gemini API获取描述，长度 {length}。
         *   INFO: 成功连接到数据库。
+        *   INFO: 尝试更新数据库，s3_key_original={s3_key_original}, annotation_status={status}。
         *   ERROR: Gemini API 调用失败: {error_message} (包括可能的block reason, safety ratings)。
         *   ERROR: 数据库操作失败: {error_message}。
-*   **数据库交互 (Database Interaction - `images` table - UPSERT logic):**
-        *   INSERT INTO images (original_s3_key, caption, caption_status, annotation, annotation_status, annotation_model, annotation_error_message, last_annotated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
-            ON DUPLICATE KEY UPDATE
-            caption = VALUES(caption),
-            caption_status = VALUES(caption_status),
-            annotation = VALUES(annotation),
-            annotation_status = VALUES(annotation_status),
-            annotation_model = VALUES(annotation_model),
-            annotation_error_message = VALUES(annotation_error_message),
-            last_annotated_at = CURRENT_TIMESTAMP
+        *   WARNING: 图片 MIME 类型 {mime_type} 不支持，跳过处理。
+*   **数据库交互 (Database Interaction - `images` table - 通过 `_update_annotation_in_db` 辅助函数):**
+        *   调用 `_update_annotation_in_db(db_conn, filename=original_filename, s3_key_original=s3_key_original, annotation_text=annotation_text, status=status_to_set_in_db, aws_request_id=aws_request_id)`
+        *   该辅助函数内部执行的SQL (示例，具体以Lambda代码为准):
+            `UPDATE images SET annotation = %s, annotation_status = %s WHERE s3_key_original = %s`
+            或者，如果Lambda需要处理记录不存在的情况，可能是类似以下的UPSERT或分步INSERT/UPDATE:
+            `INSERT INTO images (filename, s3_key_original, annotation, annotation_status) VALUES (%s, %s, %s, %s) ON DUPLICATE KEY UPDATE annotation = VALUES(annotation), annotation_status = VALUES(annotation_status)`
+            (实际Lambda中的 `_update_annotation_in_db` 使用的是 `ON DUPLICATE KEY UPDATE`)
 
 ### **2\. thumbnail\_lambda**
 
 Module ID: COMP5349_A2-LAMBDA-THUMBNAIL  
-Purpose: 由S3对象创建事件触发的AWS Lambda函数。它从S3下载新创建的图像，生成固定大小的缩略图（例如，128x128像素，JPEG格式），将缩略图上传到同一S3存储桶内的 thumbnails/ 前缀下，并使用缩略图的S3密钥和处理状态更新RDS MySQL数据库中的相应图像记录。
+Purpose: 由S3对象创建事件触发的AWS Lambda函数。它从S3下载新创建的图像 (来自 `OriginalImagesBucket`)，生成固定大小的缩略图，将缩略图上传到独立的 `ThumbnailsBucket` (使用 `THUMBNAIL_KEY_PREFIX` 前缀)，并使用缩略图的S3密钥和处理状态更新RDS MySQL数据库中的相应图像记录。
 
 #### **lambda_function.py (Thumbnail Lambda)**
 
@@ -712,39 +807,42 @@ Purpose: 由S3对象创建事件触发的AWS Lambda函数。它从S3下载新创
 *   **触发器 (Trigger):** AWS S3 (ObjectCreated via EventBridge)
     *   事件源: `aws.s3`
     *   事件类型: `Object Created`
-    *   S3桶: 主图片桶 (从环境变量 `S3_IMAGE_BUCKET` 或CloudFormation导入的 `${AppStorageStackName}-OriginalImagesBucketName` 获取)
-    *   对象键前缀 (Object Key Prefix): `uploads/`
+    *   S3桶: 原始图片桶 (即 `OriginalImagesBucket`, Lambda从S3事件中直接获取桶名)
+    *   对象键前缀 (Object Key Prefix): `uploads/` (Lambda内部逻辑会检查此前缀)
 *   **核心职责 (Core Responsibilities):**
-    1.  从S3事件中解析出bucket名和object key。
-    2.  **重要：过滤掉由 `annotation_lambda` 生成的描述对象，避免循环触发。** 描述通常存放在如 `uploads/` 前缀下。此Lambda只处理原始上传 (`uploads/`) 的图片。
-    3.  从S3下载原始图片字节流。
-    4.  生成固定大小的缩略图。
-    5.  将缩略图上传到S3的 thumbnails/ 目录下。
-    6.  更新RDS MySQL数据库中的 thumbnail_s3_key 和 thumbnail_status。
+    1.  从S3事件中解析出源桶名 (`source_bucket_name`) 和对象键 (`s3_key_original`)。
+    2.  **重要：过滤掉非 `uploads/` 前缀的对象，以及自身可能产生的位于 `thumbnails/` (或其他 `THUMBNAIL_KEY_PREFIX`) 前缀下的对象，避免循环触发。**
+    3.  从S3的 `source_bucket_name` 下载原始图片字节流。
+    4.  使用Pillow库生成固定大小的缩略图 (尺寸由 `TARGET_WIDTH` 和 `TARGET_HEIGHT` 环境变量定义)。
+    5.  将生成的缩略图上传到 `ThumbnailsBucket` (由 `THUMBNAIL_BUCKET_NAME` 环境变量指定)，使用 `THUMBNAIL_KEY_PREFIX` (环境变量) 和原始文件名构建目标S3 Key。
+    6.  连接到RDS MySQL数据库。
+    7.  更新RDS MySQL数据库中的 `s3_key_thumbnail` 和 `thumbnail_status` 字段，基于 `s3_key_original`。 (实际实现是调用 `_update_thumbnail_info_in_db` 辅助函数)
 *   **环境变量 (Environment Variables):**
-        *   `S3_IMAGE_BUCKET`: 主图片S3桶名 (通过CloudFormation导入)。
-        *   `THUMBNAIL_SIZE`: 缩略图目标尺寸 (e.g., "128x128")。
+        *   `DB_HOST`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`, `DB_PORT`: 数据库连接参数。
+        *   `THUMBNAIL_BUCKET_NAME`: 存储生成缩略图的目标S3桶名。
+        *   `THUMBNAIL_KEY_PREFIX`: 在目标桶中存储缩略图时使用的S3键前缀 (例如 'thumbnails/')。
+        *   `TARGET_WIDTH`, `TARGET_HEIGHT`: 缩略图的目标宽度和高度 (像素)。
         *   `LOG_LEVEL`: 日志级别。
-        *   `S3_ORIGINAL_IMAGES_BUCKET_NAME`: 原始图片S3桶名 (通过CloudFormation导入)。
+        *   (隐式) `S3_ORIGINAL_IMAGES_BUCKET_NAME`: 虽然CloudFormation中可能定义了这个变量，但Lambda通常直接从S3事件中获取源桶名，因此该环境变量在Lambda代码中可能不直接使用。
 *   **错误处理 (Error Handling):**
-    *   S3下载错误: 抛出 `S3InteractionError`，记录错误，更新DB状态为 'failed' 并记录错误信息。
-    *   缩略图生成错误: 抛出 `ImageProcessingError`，记录错误，更新DB状态为 'failed' 并记录错误信息。
-    *   数据库连接/操作错误: 抛出 `DatabaseError`，记录错误。如果缩略图生成成功但DB失败，原始图片应尝试记录。
+    *   S3下载/上传错误: 抛出 `S3InteractionError`，记录错误，更新DB状态为 'failed' 并记录错误信息。
+    *   缩略图生成错误 (Pillow): 抛出 `ImageProcessingError`，记录错误，更新DB状态为 'failed' 并记录错误信息。
+    *   数据库连接/操作错误: 抛出 `DatabaseError`，记录错误。如果缩略图生成和上传成功但DB失败，相关信息应尝试记录。
     *   输入事件解析错误: 抛出 `InvalidInputError`。
     *   所有未捕获的异常应被捕获，记录CRITICAL日志，并确保Lambda以失败状态退出，以便触发重试或DLQ。
 *   **日志记录 (Logging):**
-        *   INFO: 开始处理图片 {s3_key}。
-        *   INFO: 成功下载图片 {s3_key}。
-        *   INFO: 生成缩略图 {s3_key}。
-        *   INFO: 缩略图上传到S3。
+        *   INFO: 开始处理图片 {s3_key_original} 来自桶 {source_bucket_name}。
+        *   INFO: 成功下载图片 {s3_key_original}。
+        *   INFO: 成功生成缩略图 {target_dims} for {s3_key_original}。
+        *   INFO: 缩略图成功上传到 s3://{thumbnail_target_bucket_name}/{thumbnail_s3_key_generated}。
+        *   INFO: 尝试更新数据库，s3_key_original={s3_key_original}, thumbnail_status={status}, s3_key_thumbnail={key}。
         *   ERROR: 缩略图生成失败: {error_message}。
+        *   ERROR: S3操作失败: {error_message}。
         *   ERROR: 数据库操作失败: {error_message}。
-*   **数据库交互 (Database Interaction - `images` table - UPSERT logic):**
-        *   INSERT INTO images (original_s3_key, thumbnail_s3_key, thumbnail_status, last_thumbnail_generated_at)
-            VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
-            ON DUPLICATE KEY UPDATE
-            thumbnail_status = VALUES(thumbnail_status),
-            last_thumbnail_generated_at = CURRENT_TIMESTAMP
+*   **数据库交互 (Database Interaction - `images` table - 通过 `_update_thumbnail_info_in_db` 辅助函数):**
+        *   调用 `_update_thumbnail_info_in_db(db_conn, filename=original_filename, s3_key_original=s3_key_original, thumbnail_s3_key=thumbnail_s3_key_for_db, status=status_to_set_in_db, aws_request_id=aws_request_id)`
+        *   该辅助函数内部执行的SQL (基于Lambda实际代码):
+            `INSERT INTO images (filename, s3_key_original, s3_key_thumbnail, thumbnail_status) VALUES (%s, %s, %s, %s) ON DUPLICATE KEY UPDATE s3_key_thumbnail = VALUES(s3_key_thumbnail), thumbnail_status = VALUES(thumbnail_status)`
 
 ## **四、数据库 (database/)**
 
@@ -756,40 +854,44 @@ Purpose: 定义 images 表的SQL模式，该表用于存储已上传图像的元
 #### **表: images**
 
 * **职责:** 存储与每个已上传图像相关的所有元数据。  
-* **Schema 定义:**  
+* **Schema 定义 (基于 image_annotation_system_v2/database/schema.sql):**  
   CREATE TABLE IF NOT EXISTS images (  
-      id INT AUTO\_INCREMENT PRIMARY KEY,  
-      original\_s3\_key VARCHAR(1024) NOT NULL UNIQUE, \-- 原始上传图像的完整S3对象键。S3键最大长度为1024字节。  
-      caption TEXT NULL,                             \-- 由 annotation Lambda 生成的标题。可为空。  
-      thumbnail\_s3\_key VARCHAR(1024) NULL,           \-- 生成的缩略图的完整S3对象键 (例如, 'thumbnails/your\_image.jpg')。可为空。  
-      caption\_status VARCHAR(20) NOT NULL DEFAULT 'pending', \-- 标题生成状态: 'pending', 'completed', 'failed'。  
-      thumbnail\_status VARCHAR(20) NOT NULL DEFAULT 'pending', \-- 缩略图生成状态: 'pending', 'completed', 'failed'。  
-      uploaded\_at TIMESTAMP NOT NULL DEFAULT CURRENT\_TIMESTAMP, \-- 初始上传的时间戳。
+      id INT AUTO_INCREMENT PRIMARY KEY,                      -- Auto-incrementing primary key  
+      filename VARCHAR(255) NOT NULL,                         -- Original uploaded filename  
+      s3_key_original VARCHAR(1024) NOT NULL UNIQUE,          -- S3 key for original image  
+      s3_key_thumbnail VARCHAR(1024) UNIQUE,                  -- S3 key for thumbnail (nullable)  
+      annotation TEXT,                                        -- AI-generated image annotation/description (nullable)  
+      annotation_status VARCHAR(50) DEFAULT 'pending',        -- Status of annotation task (pending, completed, failed)  
+      thumbnail_status VARCHAR(50) DEFAULT 'pending',         -- Status of thumbnail task (pending, completed, failed)  
+      uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,          -- Upload timestamp  
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP -- Last update timestamp  
+  );  
 
-      \-- 性能索引  
-      INDEX idx\_uploaded\_at (uploaded\_at DESC),      \-- 用于画廊排序  
-      INDEX idx\_caption\_status (caption\_status),     \-- 用于按标题状态查询图像  
-      INDEX idx\_thumbnail\_status (thumbnail\_status)  \-- 用于按缩略图状态查询图像  
-  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4\_unicode\_ci;
+  -- Optional indexes for better query performance  
+  -- CREATE INDEX IF NOT EXISTS idx_images_annotation_status ON images(annotation_status);  
+  -- CREATE INDEX IF NOT EXISTS idx_images_thumbnail_status ON images(thumbnail_status);  
+  -- CREATE INDEX IF NOT EXISTS idx_images_uploaded_at ON images(uploaded_at);  
+  -- 注: 实际 schema.sql 中是 CREATE INDEX, 不是 CREATE INDEX IF NOT EXISTS. 
+  -- 为保持与文件一致，这里也用 CREATE INDEX。如果需要幂等性，脚本应自行处理。
 
-* **字段解释和决策:**  
+* **字段解释和决策 (基于实际 schema.sql):**  
   * id: 标准自增主键。  
-  * original\_s3\_key: 存储原始图像的唯一S3键。VARCHAR(1024) 以适应S3的最大键长。NOT NULL UNIQUE 至关重要。  
-  * caption: 存储由 annotation\_lambda 生成的文本。TEXT 允许长标题。可为空，因为它是异步填充的。  
-  * thumbnail\_s3\_key: 存储生成的缩略图的唯一S3键 (例如 thumbnails/some\_uuid.jpg)。VARCHAR(1024)。可为空。  
-  * caption\_status: VARCHAR(20) 足以容纳 'pending', 'completed', 'failed'。NOT NULL DEFAULT 'pending'。  
-  * thumbnail\_status: VARCHAR(20)，逻辑同 caption\_status。NOT NULL DEFAULT 'pending'。  
-  * uploaded\_at: TIMESTAMP NOT NULL DEFAULT CURRENT\_TIMESTAMP 用于记录上传时间，对画廊排序至关重要。  
-* **索引:**  
-  * original\_s3\_key 上的 UNIQUE 约束会自动创建索引。  
-  * idx\_uploaded\_at (uploaded\_at DESC): 对于高效获取画廊视图的图像（按上传时间排序）至关重要。  
-  * idx\_caption\_status 和 idx\_thumbnail\_status: 对于未来可能的管理任务或仪表板（例如，查找所有字幕生成失败的图像）非常有用。  
-* **引擎和字符集:** ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4\_unicode\_ci 是MySQL的标准良好选择，支持广泛的字符（对标题很重要）和事务。  
+  * filename: VARCHAR(255) NOT NULL。存储原始上传的文件名。  
+  * s3_key_original: VARCHAR(1024) NOT NULL UNIQUE。原始图像的S3键。  
+  * s3_key_thumbnail: VARCHAR(1024) UNIQUE。缩略图的S3键，可为空。  
+  * annotation: TEXT。AI生成的图像描述 (之前文档中为 caption)。可为空。  
+  * annotation_status: VARCHAR(50) DEFAULT 'pending'。标注任务状态 ('pending', 'completed', 'failed')。 (之前文档中为 caption_status)。  
+  * thumbnail_status: VARCHAR(50) DEFAULT 'pending'。缩略图任务状态 ('pending', 'completed', 'failed')。  
+  * uploaded_at: TIMESTAMP DEFAULT CURRENT_TIMESTAMP。上传时间戳。  
+  * updated_at: TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP。记录最后更新时间戳。  
+* **索引 (基于实际 schema.sql):**  
+  * s3_key_original 上的 UNIQUE 约束会自动创建索引。  
+  * 对 annotation_status, thumbnail_status, uploaded_at 分别创建了索引。  
+* **引擎和字符集:** (假设实际 schema.sql 未指定，则使用默认或推荐的) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci 是MySQL的标准良好选择。  
 * **与作业要求的符合度:**  
-  * 此模式直接支持存储原始图像位置、生成的标题、生成的缩略图及其各自的处理状态，这些都是Web应用程序的画廊页面和Lambda函数操作所必需的。  
-  * 它将Web应用程序与标题和缩略图的直接生成解耦，符合无服务器架构的要求。  
+  * 此模式支持存储原始图像位置、生成的内容 (annotation)、生成的缩略图及其各自的处理状态。  
 * **create-database.sh 调整:**  
-  * 来自Assignment 1的 create-database.sh 脚本需要更新，以反映这个新的 images 表模式，而不是旧的 captions 表。
+  * 来自Assignment 1的 create-database.sh 脚本需要更新，以反映这个新的 images 表模式。
 
 ## **五、部署 (deployment/)**
 
@@ -829,16 +931,24 @@ Purpose: 概述部署整个图像标注系统的关键AWS资源及其配置策�
      * (隐式) Gemini API的网络访问权限 (通过NAT网关)。  
    * ThumbnailLambdaExecutionRole:  
      * AWSLambdaBasicExecutionRole, AWSLambdaVPCAccessExecutionRole (如果需要)。  
-     * S3权限: s3:GetObject 来自 arn:aws:s3:::{S3\_IMAGE\_BUCKET}/\*, s3:PutObject 到 arn:aws:s3:::{S3\_IMAGE\_BUCKET}/thumbnails/\*。  
+     * S3权限: s3:GetObject 来自 arn:aws:s3:::{OriginalImagesBucketName}/uploads/*, s3:PutObject 到 arn:aws:s3:::{ThumbnailsBucketName}/${THUMBNAIL_KEY_PREFIX}/*。  
      * RDS & Secrets Manager: 与 AnnotationLambdaExecutionRole 类似。  
-4. **S3存储桶 (S3\_IMAGE\_BUCKET 变量):**  
-   * **名称:** 全局唯一 (例如 comp5349-a2-images-\<your-unique-id\>)。  
-   * **版本控制:** 禁用 (为简单和成本考虑，默认为禁用)。  
-   * **事件通知:**  
-     * **事件类型:** s3:ObjectCreated:\*。  
-     * **前缀过滤器:** 无 (Lambda代码将过滤 thumbnails/ 下的对象)。或者，可以配置前缀，例如只对 uploads/ 前缀触发。当前设计是Lambda内部过滤 thumbnails/。  
-     * **后缀过滤器:** .jpg, .jpeg, .png, .gif (以避免对其他文件类型触发)。  
-     * **目标:** annotation\_lambda 的ARN **和** thumbnail\_lambda 的ARN (一个S3事件通知可以触发多个Lambda函数)。  
+4. **S3存储桶 (两个核心桶):**
+   * **`OriginalImagesBucket` (CloudFormation参数/输出中通常称为 `OriginalImagesBucketName`):**
+     * **职责:** 存储用户通过Web应用上传的原始图片，通常存放于 `uploads/` 前缀下。
+     * **版本控制:** 通常禁用 (为简单和成本考虑)。
+     * **事件通知 (通过EventBridge):**
+       * 在CloudFormation模板 (`02-application-stack.yaml`) 中为此桶配置 `NotificationConfiguration` 使其 `EventBridgeConfiguration.EventBridgeEnabled: true`。
+       * S3发出的 `ObjectCreated` 事件 (特别是针对 `uploads/` 前缀下的对象) 将被发送到AWS EventBridge的默认总线。
+       * `03-lambda-stack.yaml` 中定义的EventBridge规则将侦听这些事件 (基于 `detail-type: "Object Created"`, `source: "aws.s3"`, `detail.bucket.name: <OriginalImagesBucketName>`, 和 `detail.object.key` 前缀 `uploads/`)，并以此触发 `AnnotationLambdaFunction` 和 `ThumbnailLambdaFunction`。
+   * **`ThumbnailsBucket` (CloudFormation参数/输出中通常称为 `ThumbnailsBucketName`):**
+     * **职责:** 存储由 `ThumbnailLambdaFunction` 生成的缩略图。缩略图通常会使用 `THUMBNAIL_KEY_PREFIX` 环境变量 (例如 `thumbnails/`) 作为其在桶内的S3对象键前缀。
+     * **版本控制:** 通常禁用。
+     * **访问:** 主要由 `ThumbnailLambdaFunction` 写入，并由Web应用 (`app.py`) 通过生成的预签名URL读取以在画廊中显示。
+     * **事件通知:** 通常不为此桶配置触发Lambda的事件通知，以避免潜在的循环或不必要的处理。
+   * **命名:** 两个桶的实际名称由CloudFormation基于堆栈名和资源逻辑ID动态生成，以确保全局唯一性。
+   * **CORS配置:** 如果浏览器需要直接通过 `<img>` 标签的 `src` (即使是预签名URL) 从这些桶加载图片，可能需要在两个桶上配置CORS规则，允许来自Web应用部署域名的GET请求。这通常在S3桶资源定义中通过 `CorsConfiguration` 完成。
+
 5. **RDS MySQL实例:**  
    * **引擎:** MySQL (例如 8.0.x)。  
    * **实例类别:** 最小适用实例 (例如 Learner Lab中的 db.t3.micro 或 db.t2.micro)。  
@@ -944,6 +1054,16 @@ Purpose: 概述部署整个图像标注系统的关键AWS资源及其配置策�
     * `AWS::Events::Rule` (x1 S3上传事件规则，目标为EventBridge默认总线)  
     * `AWS::Lambda::Permission` (x2 允许EventBridge调用Lambda函数)
 
+* **04-ec2-alb-asg-stack.yaml:**
+  * **职责:** 定义Web应用的前端服务层，包括Application Load Balancer (ALB), EC2 Auto Scaling Group (ASG), 和EC2 Launch Template。
+  * **主要资源:**
+    * `AWS::EC2::LaunchTemplate`: 定义EC2实例的配置，包括AMI ID, 实例类型, IAM实例配置文件, 安全组，以及最重要的 `UserData` 脚本。
+      * **UserData脚本:** 负责在实例启动时安装依赖 (Python, Docker等)、拉取Web应用代码 (或Docker镜像)、设置环境变量 (包括 `S3_IMAGE_BUCKET` 指向 `OriginalImagesBucket`，`S3_THUMBNAIL_BUCKET` 指向 `ThumbnailsBucket`，以及数据库连接参数)，并启动Web应用服务 (如Gunicorn + Flask)。
+    * `AWS::AutoScaling::AutoScalingGroup`: 管理EC2实例的自动伸缩，关联到Launch Template和ALB的目标组。
+    * `AWS::ElasticLoadBalancingV2::LoadBalancer`, `AWS::ElasticLoadBalancingV2::TargetGroup`, `AWS::ElasticLoadBalancingV2::Listener`: 配置ALB以接收外部HTTP请求并将其分发到ASG中的EC2实例上运行的Web应用。
+    * `AWS::IAM::Role` 和 `AWS::IAM::Policy`: 为EC2实例创建的IAM角色，授予其访问S3 (PutObject到 `OriginalImagesBucket`)、读取Secrets Manager (如果使用) 和写入CloudWatch Logs的权限。
+    * `AWS::EC2::SecurityGroup`: 例如 `ALBSecurityGroup` 和 `EC2InstanceSecurityGroup`。
+
 ## **六、测试策略 (Testing Strategy)**
 
 本项目的测试策略侧重于确保各个组件的正确性和系统整体的稳定性，主要包括单元测试、集成考虑以及端到端验证。
@@ -1018,7 +1138,7 @@ Purpose: 概述部署整个图像标注系统的关键AWS资源及其配置策�
 
 *   **`pytest.ini`:** 
     *   **作用:** 用于配置 `pytest` 的行为，以优化测试发现和执行过程。
-    *   **关键配置 (`norecursedirs`):** 
+    *   **关键配置 (`norecursedirs`):**  
         ```ini
         [pytest]
         norecursedirs = .git .pytest_cache .*_cache logs .*env venv env node_modules target build dist package */package .*\.egg-info

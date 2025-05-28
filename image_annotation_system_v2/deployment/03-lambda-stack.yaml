@@ -40,14 +40,14 @@ Parameters:
     Description: >
       Full ECR Image URI (including tag or SHA256 digest) for the Annotation Lambda function. 
       The ECR repository itself (e.g., comp5349a2-annotation-lambda) is created by the ECR Stack.
-    Default: "032664865485.dkr.ecr.us-east-1.amazonaws.com/comp5349a2-annotation-lambda@sha256:d4970b35508ccaab28bb2ec18252692d85b60bac1c6245890c5f9b9c77a5668d"
+    Default: "032664865485.dkr.ecr.us-east-1.amazonaws.com/comp5349a2-annotation-lambda@sha256:6f247ba26c8ac9783f240801d761e55950beba9ddea5a639308d24cdf4c87207"
 
   ThumbnailLambdaImageUri:
     Type: String
     Description: >
       Full ECR Image URI (including tag or SHA256 digest) for the Thumbnail Lambda function. 
       The ECR repository itself (e.g., comp5349a2-thumbnail-lambda) is created by the ECR Stack.
-    Default: "032664865485.dkr.ecr.us-east-1.amazonaws.com/comp5349a2-thumbnail-lambda@sha256:a9d7eac260d8f8a2494689c964a4759adf7a4fc84faded034c411a99e1975bf1"
+    Default: "032664865485.dkr.ecr.us-east-1.amazonaws.com/comp5349a2-thumbnail-lambda@sha256:21bb767a75a53079dec2d08c811e667381772c378b8a7134ceba8ece0ed53773"
 
   GeminiModelName:
     Type: String

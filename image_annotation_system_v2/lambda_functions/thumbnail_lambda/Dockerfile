@@ -6,8 +6,6 @@ FROM public.ecr.aws/lambda/python:3.9-x86_64
 
 # 2. 将依赖需求文件复制到工作目录
 COPY requirements.txt .
-
-# 3. 关键修复：使用精确的平台和版本标志，强制pip下载兼容的二进制包
 RUN pip install -r requirements.txt
 
 # 4. 将我们的函数代码也复制到 "package" 目录中

@@ -1,10 +1,12 @@
 # Image Annotation System v2
 
-This repository contains the source code, documentation, and deployment artifacts for the **Image Annotation System v2**, a cloud-native web application designed for automated image processing and annotation. The system leverages a serverless, event-driven architecture on AWS to provide a scalable, resilient, and efficient solution.
+This COMP5349 course project contains the source, documentation, and deployment artifacts for **Image Annotation System v2**, an AWS application for image uploads, Gemini-generated captions, and thumbnails.
+
+The deployment and load-test records in [Report/report.md](Report/report.md) describe historical course work. They do not establish that the AWS resources or endpoints are currently running. AI-assisted maintenance currently covers documentation and source checks; no cloud deployment or load test was performed for this update.
 
 ## Architecture Overview
 
-The system is built on a modern, three-tier cloud architecture that separates concerns between the user-facing web application, durable storage, and asynchronous backend processing.
+The source and CloudFormation templates define a three-tier architecture that separates concerns between the user-facing web application, durable storage, and asynchronous backend processing.
 
 ```mermaid
 graph TD
@@ -66,17 +68,17 @@ graph TD
 4.  The **Annotation Lambda** calls the **Google Gemini API** to generate a descriptive caption for the image.
 5.  The **Thumbnail Lambda** creates a fixed-size thumbnail of the image.
 6.  Both Lambda functions update the image's record in the **RDS Database** with the results (caption, thumbnail location) and status (`completed` or `failed`).
-7.  The web app's gallery dynamically displays the images, their annotations, and thumbnails by generating secure, temporary URLs (presigned URLs) for the content in S3.
+7.  The web app's gallery dynamically displays the images, their annotations, and thumbnails by generating temporary presigned URLs for the content in S3.
 
 ## Key Features
 
--   **Asynchronous Processing**: Image captioning and thumbnailing are handled in the background without blocking the user interface.
--   **Scalable Web Tier**: The web application is hosted on an EC2 Auto Scaling Group behind an Application Load Balancer, allowing it to handle variable traffic loads.
--   **Serverless Backend**: AWS Lambda functions provide a cost-effective, scalable, and maintenance-free solution for image processing.
--   **AI-Powered Annotation**: Integrates with Google's Gemini API to provide intelligent, context-aware descriptions for images.
--   **Secure and Durable Storage**: Uses AWS S3 for image storage and RDS for structured metadata, ensuring data integrity and availability.
--   **Infrastructure as Code (IaC)**: The entire cloud infrastructure is defined and managed using AWS CloudFormation templates for consistency and repeatability.
--   **Load Testing**: Includes a script to simulate user traffic and test the performance and scalability of the application.
+-   **Asynchronous Processing**: Separate Lambda functions handle captioning and thumbnail generation after image upload.
+-   **Web Tier**: CloudFormation templates define an EC2 Auto Scaling Group and Application Load Balancer for the Flask web app.
+-   **Lambda Backend**: Includes separate annotation and thumbnail functions, container definitions, and packaging scripts.
+-   **Image Annotation**: The annotation function calls Google's Gemini API for image captions.
+-   **Storage**: Uses S3 for images and RDS/MySQL for image metadata.
+-   **Infrastructure as Code**: Includes five CloudFormation templates for repositories, networking, application resources, Lambda, and the web tier.
+-   **Load-Test Script**: Includes a script for sending concurrent requests to the gallery endpoint; historical observations are retained in the course report.
 
 ## Tech Stack
 
@@ -119,9 +121,9 @@ For detailed instructions on local setup, please refer to the [README inside the
 
 ## Deployment
 
-The entire infrastructure is deployed using the AWS CloudFormation templates located in the `image_annotation_system_v2/deployment/` directory.
+The historical deployment procedure uses the AWS CloudFormation templates in `image_annotation_system_v2/deployment/`. Review account configuration, service requirements, and the Gemini SDK/model settings before attempting a new deployment; the current AWS environment has not been checked.
 
-The deployment is modular and consists of several stacks that must be deployed in order:
+The documented stack order is:
 1.  `00-ecr-repositories.yaml`: Creates ECR repositories for Docker images.
 2.  `01-vpc-network.yaml`: Sets up the VPC and networking infrastructure.
 3.  `02-application-stack.yaml`: Provisions S3 buckets and the RDS database.
